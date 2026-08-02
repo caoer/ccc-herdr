@@ -15,6 +15,7 @@ var (
 	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("237"))
 	idStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
 	roleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	idleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("172"))
 	faintStyle    = lipgloss.NewStyle().Faint(true)
 
 	statusStyles = map[string]lipgloss.Style{
@@ -144,8 +145,8 @@ func (m Model) View() tea.View {
 	return view
 }
 
-// row renders one candidate line: status dot, id, role, name, title, and a
-// right-aligned workspace·tab location.
+// row renders one candidate line: status dot, id, role, name, idle, title,
+// and a right-aligned workspace·tab location.
 func (m Model) row(c Candidate, selected bool) string {
 	dot := "·"
 	if style, ok := statusStyles[c.Status]; ok && c.IsAgent {
@@ -170,11 +171,12 @@ func (m Model) row(c Candidate, selected bool) string {
 		location += "·" + c.Tab
 	}
 
-	left := fmt.Sprintf(" %s %s %s %s ",
+	left := fmt.Sprintf(" %s %s %s %s %s ",
 		dot,
 		idStyle.Render(pad(id, 9)),
 		roleStyle.Render(pad(c.Role, 7)),
 		pad(name, 16),
+		idleStyle.Render(pad(c.Idle, 6)),
 	)
 	locRendered := faintStyle.Render(location) + " "
 	titleWidth := m.width - lipgloss.Width(left) - lipgloss.Width(locRendered) - 1

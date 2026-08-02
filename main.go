@@ -155,8 +155,8 @@ func runList() int {
 		return fail(err)
 	}
 	for _, c := range cands {
-		fmt.Printf("%-8s %-9s %-8s %-18s %-9s %-40s %s·%s\n",
-			c.PaneID, c.ID, c.Role, c.Name, c.Status, c.Title, c.Workspace, c.Tab)
+		fmt.Printf("%-8s %-9s %-8s %-18s %-9s %-6s %-40s %s·%s\n",
+			c.PaneID, c.ID, c.Role, c.Name, c.Status, c.Idle, c.Title, c.Workspace, c.Tab)
 	}
 	return 0
 }

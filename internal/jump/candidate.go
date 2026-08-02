@@ -21,6 +21,7 @@ type Candidate struct {
 	Name      string // tokens.name, else profile, else display_agent
 	Role      string // tokens.role
 	Session   string // tokens.session
+	Idle      string // tokens.idle — time since last hook event, "" while active
 	Title     string // stripped terminal title
 	Dir       string // foreground cwd, home-abbreviated
 	Seq       int    // agent activity counter, recency proxy
@@ -71,6 +72,7 @@ func Build(snap *herdr.Snapshot, selfPane string) []Candidate {
 			Name:      name,
 			Role:      p.Tokens["role"],
 			Session:   p.Tokens["session"],
+			Idle:      p.Tokens["idle"],
 			Title:     p.TerminalTitle,
 			Dir:       abbreviate(dir, home),
 			Seq:       seqs[p.PaneID],

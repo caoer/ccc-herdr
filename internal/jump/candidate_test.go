@@ -25,7 +25,7 @@ func snapshotFixture() *herdr.Snapshot {
 				TerminalTitle: "reader",
 				Tokens: map[string]string{
 					"id": "94485806", "name": "reader", "role": "advisor",
-					"session": "02-00-adhoc",
+					"session": "02-00-adhoc", "idle": "3h49m",
 				},
 			},
 			{PaneID: "w2:p9", TabID: "w2:t1", WorkspaceID: "w2"},
@@ -73,6 +73,12 @@ func TestBuildResolvesNameAndLabels(t *testing.T) {
 	}
 	if worker.Workspace != "meridian-rs" || worker.Tab != "2" {
 		t.Fatalf("labels not resolved: %q %q", worker.Workspace, worker.Tab)
+	}
+	if advisor := byPane["w2:p1"]; advisor.Idle != "3h49m" {
+		t.Fatalf("idle token not resolved: %q", advisor.Idle)
+	}
+	if worker.Idle != "" {
+		t.Fatalf("missing idle token must stay empty, got %q", worker.Idle)
 	}
 }
 
