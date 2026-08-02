@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"time"
 )
 
 var requestCounter atomic.Int64
@@ -85,12 +86,22 @@ type response struct {
 	} `json:"error"`
 }
 
+// Call timeouts: every socket path in this repo is bounded — an unbounded
+// read here once latched the painter's sweep guard forever (a wedged herdr
+// accepts and never answers). Snapshot responses run tens of KB, so the
+// read deadline is looser than report.go's send path but still finite.
+const (
+	callDialTimeout = 300 * time.Millisecond
+	callIODeadline  = 3 * time.Second
+)
+
 func (c *Client) call(method string, params any, result any) error {
-	conn, err := net.Dial("unix", c.socketPath)
+	conn, err := net.DialTimeout("unix", c.socketPath, callDialTimeout)
 	if err != nil {
 		return fmt.Errorf("%s: connect %s: %w", method, c.socketPath, err)
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(callIODeadline))
 
 	payload, err := json.Marshal(request{
 		ID:     fmt.Sprintf("ccc-herdr-%d-%d", os.Getpid(), requestCounter.Add(1)),
@@ -118,6 +129,10 @@ func (c *Client) call(method string, params any, result any) error {
 	}
 	return nil
 }
+
+// SocketPath is the endpoint this client talks to — callers that scope
+// per-socket decisions (the painter's pane-liveness veto) key on it.
+func (c *Client) SocketPath() string { return c.socketPath }
 
 // Snapshot fetches the live session snapshot.
 func (c *Client) Snapshot() (*Snapshot, error) {

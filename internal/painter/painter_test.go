@@ -185,8 +185,11 @@ func indexOf(s, sub string) int {
 
 func TestConcurrentSweepAndRepaint(t *testing.T) {
 	p, sock, lines := newTestPainter(t)
+	// Panes alternate p1/p2 (both live in the stub snapshot) so the sweep's
+	// claimant election paints BOTH panes and genuinely contends with the
+	// direct Repaint goroutines on the same sessStates.
 	for i := 0; i < 6; i++ {
-		writeSessCache(t, fmt.Sprintf("sess%d000000000000", i), "p1", sock, i%2)
+		writeSessCache(t, fmt.Sprintf("sess%d000000000000", i), fmt.Sprintf("p%d", i%2+1), sock, i%2)
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {
@@ -334,5 +337,112 @@ func TestCacheDirCleansTrailingSlash(t *testing.T) {
 	t.Setenv("CCC_CACHE_DIR", dir+string(os.PathSeparator))
 	if got := facts.CacheDir(); got != dir {
 		t.Fatalf("CacheDir must clean trailing separators: %q", got)
+	}
+}
+
+func TestIdentityBrakeHoldsThenCoolsDown(t *testing.T) {
+	p, _, _ := newTestPainter(t)
+	cfg := p.config()
+	deadSock := filepath.Join(shortTmpDir(t), "dead.sock")
+	if err := os.WriteFile(deadSock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st := &sessState{lastPending: -1}
+	cache := facts.Cache{SessionID: "s", HerdrPaneID: "p1", HerdrSocketPath: deadSock}
+	vars := map[string]string{"SESSION_ID_SHORT": "s", "CCC_SESSION": "x", "ROLE": "worker", "NAME": "n", "TITLE": "n", "PROFILE": "pr", "PROFILE_IF_UNNAMED": ""}
+
+	p.paintIdentity(st, cfg, cache, vars, false)
+	if st.failedHash == "" {
+		t.Fatal("failure must arm the brake")
+	}
+	firstFail := st.failedAt
+
+	// Within the cooldown the brake holds: no state change on a repeat.
+	p.paintIdentity(st, cfg, cache, vars, false)
+	if st.failedAt != firstFail {
+		t.Fatal("braked repeat must not re-attempt inside the cooldown")
+	}
+
+	// Past the cooldown the brake releases and the send is re-attempted
+	// (still failing here — failedAt advances, proving the wire attempt).
+	st.failedAt = time.Now().Add(-failureRetryCooldown - time.Second)
+	p.paintIdentity(st, cfg, cache, vars, false)
+	if !st.failedAt.After(firstFail) {
+		t.Fatal("expired cooldown must re-attempt the send")
+	}
+}
+
+func TestPaintAUQLeaseZeroRetriesFailedEdge(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	cfg := p.config()
+	cfg.AUQLease = 0
+	st := &sessState{lastPending: 0} // settled painter state, question arrives
+	dead := filepath.Join(shortTmpDir(t), "gone.sock")
+	cache := facts.Cache{SessionID: "s", HerdrPaneID: "p1", HerdrSocketPath: dead, AUQPending: 1}
+
+	p.paintAUQ(st, cfg, cache, false)
+	if st.lastPending != 0 {
+		t.Fatal("lease=0: failed edge must stay armed (no TTL self-heal exists)")
+	}
+
+	// The pane comes back at the same path: the next cache write retries.
+	cache.HerdrSocketPath = sock
+	p.paintAUQ(st, cfg, cache, false)
+	if st.lastPending != 1 {
+		t.Fatal("retry after recovery must advance state")
+	}
+	if got := drain(lines); len(got) != 1 || !stringContains(got[0], `"blocked"`) {
+		t.Fatalf("retried edge must reach the wire, got %v", got)
+	}
+}
+
+func TestSweepBoundedAgainstWedgedHerdr(t *testing.T) {
+	p, _, _ := newTestPainter(t)
+	// A herdr that accepts and never answers: the snapshot call must hit its
+	// deadline instead of latching the sweep guard forever.
+	wedged := filepath.Join(shortTmpDir(t), "wedged.sock")
+	ln, err := net.Listen("unix", wedged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c // hold open, never reply
+		}
+	}()
+	t.Setenv("HERDR_SOCKET_PATH", wedged)
+
+	done := make(chan struct{})
+	go func() {
+		p.Sweep()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("sweep must be bounded against a wedged herdr")
+	}
+	if p.sweeping.Load() {
+		t.Fatal("sweep guard must release")
+	}
+}
+
+func TestLivenessVetoScopedToSocket(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	// Session bound to a DIFFERENT herdr socket than the probed one, on a
+	// pane id the probed snapshot does not list: must NOT be vetoed.
+	otherSock, otherLines := stubHerdr(t)
+	writeSessCache(t, "otherherdr0000000", "p9", otherSock, 0)
+	writeSessCache(t, "sameherdr00000000", "p9", sock, 0) // same pane id, probed socket → vetoed
+
+	p.Sweep()
+	drain(lines)
+	if got := drain(otherLines); len(got) == 0 {
+		t.Fatal("a session on another herdr socket must not be vetoed by this socket's snapshot")
 	}
 }

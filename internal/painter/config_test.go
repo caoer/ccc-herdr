@@ -61,6 +61,30 @@ func TestLoadConfigWrongTypeWarnsAndKeepsDefault(t *testing.T) {
 	}
 }
 
+func TestLoadConfigClampsTTLAtHerdrCeiling(t *testing.T) {
+	path := writeConfig(t, "[painter]\nttl = \"48h\"\n[auq]\nlease = \"30h\"\n")
+	var diags []string
+	cfg := LoadConfig(path, func(format string, args ...any) { diags = append(diags, format) })
+	if cfg.TTL != herdrMaxTTL || cfg.AUQLease != herdrMaxTTL {
+		t.Fatalf("beyond-ceiling durations must clamp to 24h, got ttl=%s lease=%s", cfg.TTL, cfg.AUQLease)
+	}
+	if len(diags) != 2 {
+		t.Fatalf("clamps must diagnose, got %v", diags)
+	}
+}
+
+func TestLoadConfigWhitespaceLabelDisables(t *testing.T) {
+	path := writeConfig(t, "[auq]\nblocked_label = \"  \"\n")
+	var diags []string
+	cfg := LoadConfig(path, func(format string, args ...any) { diags = append(diags, format) })
+	if cfg.AUQLabel != "" {
+		t.Fatalf("whitespace label must disable the AUQ writer, got %q", cfg.AUQLabel)
+	}
+	if len(diags) != 1 {
+		t.Fatalf("the disable must diagnose, got %v", diags)
+	}
+}
+
 func TestLoadConfigUnknownKeysDiagnose(t *testing.T) {
 	path := writeConfig(t, "[painter]\nbogus = 1\n[mystery]\nx = 1\n")
 	var diags []string

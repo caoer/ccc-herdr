@@ -51,10 +51,11 @@ func DefaultConfig() Config {
 }
 
 // ConfigPath resolves the config file: $CCC_HERDR_CONFIG, else
-// $UCC_HOME/config/ccc-herdr.toml.
+// $UCC_HOME/config/ccc-herdr.toml. Cleaned — hot-reload compares this
+// against cleaned fsnotify event paths.
 func ConfigPath() string {
 	if p := strings.TrimSpace(os.Getenv("CCC_HERDR_CONFIG")); p != "" {
-		return p
+		return filepath.Clean(p)
 	}
 	base := strings.TrimSpace(os.Getenv("UCC_HOME"))
 	if base == "" {
