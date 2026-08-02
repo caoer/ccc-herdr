@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>dev.ccc.herdr-painter</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/Shared/repos/ccc-herdr/bin/ccc-herdr</string>
+		<string>painter</string>
+		<string>run</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>/tmp/ccc-herdr-painter.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/ccc-herdr-painter.log</string>
+</dict>
+</plist>

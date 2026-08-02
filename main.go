@@ -1,9 +1,17 @@
-// ccc-herdr is the herdr companion plugin for the ccc fleet.
+// ccc-herdr is the herdr companion for the ccc fleet.
+//
+// Jump (phase 1):
 //
 //	ccc-herdr jump           action entrypoint: opens the jumper popup
 //	ccc-herdr jumper         popup entrypoint: fuzzy finder over live panes
 //	ccc-herdr focus <query>  headless: jump straight to the best match
 //	ccc-herdr list           headless: print the candidate table
+//
+// Painter (phase 2):
+//
+//	ccc-herdr painter run    resident pane-label painter
+//	ccc-herdr check [sid]    config diagnostics + the exact wire line(s)
+//	ccc-herdr paint [sid]    force one repaint (all sessions without sid)
 package main
 
 import (
@@ -32,8 +40,14 @@ func main() {
 		code = runFocus(os.Args[2:])
 	case "list":
 		code = runList()
+	case "painter":
+		code = runPainter(os.Args[2:])
+	case "check":
+		code = runCheck(os.Args[2:])
+	case "paint":
+		code = runPaint(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list")
+		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list|painter run|check [sid]|paint [sid]")
 		code = 2
 	}
 	os.Exit(code)
