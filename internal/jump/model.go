@@ -12,7 +12,7 @@ var (
 	promptStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
 	countStyle    = lipgloss.NewStyle().Faint(true)
 	helpStyle     = lipgloss.NewStyle().Faint(true)
-	selectedStyle = lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("237"))
+	selectedBg    = lipgloss.Color("237")
 	idStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
 	roleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
 	idleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("172"))
@@ -146,11 +146,22 @@ func (m Model) View() tea.View {
 }
 
 // row renders one candidate line: status dot, id, role, name, idle, title,
-// and a right-aligned workspace·tab location.
+// and a right-aligned workspace·tab location. Every segment's Render ends in
+// a full SGR reset, so a selection background must ride on EACH segment —
+// wrapping the finished line in one background style paints only up to the
+// first styled token.
 func (m Model) row(c Candidate, selected bool) string {
-	dot := "·"
-	if style, ok := statusStyles[c.Status]; ok && c.IsAgent {
-		dot = style.Render("●")
+	sty := func(s lipgloss.Style) lipgloss.Style {
+		if selected {
+			return s.Bold(true).Background(selectedBg)
+		}
+		return s
+	}
+	plain := sty(lipgloss.NewStyle())
+
+	dot, dotStyle := "·", plain
+	if s, ok := statusStyles[c.Status]; ok && c.IsAgent {
+		dot, dotStyle = "●", sty(s)
 	}
 
 	id := c.ID
@@ -171,22 +182,20 @@ func (m Model) row(c Candidate, selected bool) string {
 		location += "·" + c.Tab
 	}
 
-	left := fmt.Sprintf(" %s %s %s %s %s ",
-		dot,
-		idStyle.Render(pad(id, 9)),
-		roleStyle.Render(pad(c.Role, 7)),
-		pad(name, 16),
-		idleStyle.Render(pad(c.Idle, 6)),
-	)
-	locRendered := faintStyle.Render(location) + " "
+	left := plain.Render(" ") + dotStyle.Render(dot) + plain.Render(" ") +
+		sty(idStyle).Render(pad(id, 9)) + plain.Render(" ") +
+		sty(roleStyle).Render(pad(c.Role, 7)) + plain.Render(" ") +
+		plain.Render(pad(name, 16)) + plain.Render(" ") +
+		sty(idleStyle).Render(pad(c.Idle, 6)) + plain.Render(" ")
+	locRendered := sty(faintStyle).Render(location) + plain.Render(" ")
 	titleWidth := m.width - lipgloss.Width(left) - lipgloss.Width(locRendered) - 1
 	if titleWidth < 4 {
 		titleWidth = 4
 	}
-	line := left + pad(truncate(title, titleWidth), titleWidth) + " " + locRendered
-
-	if selected {
-		return selectedStyle.Render(truncate(line, m.width))
+	line := left + plain.Render(pad(truncate(title, titleWidth), titleWidth)+" ") + locRendered
+	// Fill to full width so the selection band spans the whole popup row.
+	if fill := m.width - lipgloss.Width(line); fill > 0 {
+		line += plain.Render(strings.Repeat(" ", fill))
 	}
 	return truncate(line, m.width)
 }
