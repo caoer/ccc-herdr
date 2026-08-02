@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestVarsResolution(t *testing.T) {
@@ -43,6 +44,40 @@ func TestVarsUnjoinedAndUnnamed(t *testing.T) {
 	}
 	if vars["PROFILE_IF_UNNAMED"] != "grid-mullein1b" {
 		t.Fatalf("PROFILE_IF_UNNAMED must show while untitled: %q", vars["PROFILE_IF_UNNAMED"])
+	}
+}
+
+func TestFormatIdle(t *testing.T) {
+	cases := []struct {
+		d       time.Duration
+		unknown bool
+		want    string
+	}{
+		{0, true, ""},                          // no hook event yet
+		{-5 * time.Minute, false, ""},          // future timestamp (clock skew)
+		{30 * time.Second, false, ""},          // active session → token clear
+		{5 * time.Minute, false, "5m"},
+		{59 * time.Minute, false, "59m"},
+		{60 * time.Minute, false, "1h"},
+		{65 * time.Minute, false, "1h5m"},
+		{23*time.Hour + 59*time.Minute, false, "23h59m"},
+		{24 * time.Hour, false, "1d"},
+		{51 * time.Hour, false, "2d3h"},
+	}
+	for _, tc := range cases {
+		if got := formatIdle(tc.d, tc.unknown); got != tc.want {
+			t.Errorf("formatIdle(%v, %v): got %q want %q", tc.d, tc.unknown, got, tc.want)
+		}
+	}
+}
+
+func TestVarsIdle(t *testing.T) {
+	c := Cache{LastHookEvent: time.Now().Add(-10 * time.Minute)}
+	if got := Vars("abcd1234", c, MapEntry{})["IDLE"]; got != "10m" {
+		t.Fatalf("IDLE: got %q want 10m", got)
+	}
+	if got := Vars("abcd1234", Cache{}, MapEntry{})["IDLE"]; got != "" {
+		t.Fatalf("zero LastHookEvent must clear the token, got %q", got)
 	}
 }
 

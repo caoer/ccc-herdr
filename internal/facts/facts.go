@@ -226,6 +226,7 @@ func Vars(sessionID string, c Cache, entry MapEntry) map[string]string {
 		"CONTEXT_TOKENS":   itoa(c.ContextTokens),
 		"CONTEXT_PERCENT":  itoa(c.ContextPercent),
 		"COST":             trimFloat(c.Cost),
+		"IDLE":             formatIdle(time.Since(c.LastHookEvent), c.LastHookEvent.IsZero()),
 	}
 	if len(sessionID) >= 8 {
 		vars["SESSION_ID_SHORT"] = sessionID[:8]
@@ -248,6 +249,33 @@ func Vars(sessionID string, c Cache, entry MapEntry) map[string]string {
 		vars["PROFILE_IF_UNNAMED"] = vars["PROFILE"]
 	}
 	return vars
+}
+
+// formatIdle renders time since the last hook event, minute-truncated so the
+// identity content hash changes at most once a minute (one sweep-driven send
+// per session per minute, not per repaint). Under a minute — an ACTIVE
+// session — renders empty (token clear): idle is a marker for quiet panes,
+// not a stopwatch on busy ones. Unknown or future timestamps render empty.
+func formatIdle(d time.Duration, unknown bool) string {
+	if unknown || d < time.Minute {
+		return ""
+	}
+	m := int(d.Minutes())
+	switch {
+	case m < 60:
+		return strconv.Itoa(m) + "m"
+	case m < 24*60:
+		if m%60 == 0 {
+			return strconv.Itoa(m/60) + "h"
+		}
+		return strconv.Itoa(m/60) + "h" + strconv.Itoa(m%60) + "m"
+	default:
+		days, hours := m/(24*60), m%(24*60)/60
+		if hours == 0 {
+			return strconv.Itoa(days) + "d"
+		}
+		return strconv.Itoa(days) + "d" + strconv.Itoa(hours) + "h"
+	}
 }
 
 // itoa / trimFloat render numeric facts; zero renders empty (unknown fact →

@@ -43,8 +43,17 @@ ccc-herdr focus ad3009b4  # jump straight to the best match
 Both read the same live snapshot the popup uses, so agents can drive the jump
 without a UI.
 
-## Roadmap
+## Painter
 
-- Phase 1 (this): fuzzy jump-to-agent.
-- Phase 2: absorb the ccc-statusd pane-label rendering (`herdr paint`) for
-  richer fleet rendering.
+The resident painter renders every ccc pane label (identity tokens, navigator
+title, AUQ blocked label) from statusd's fact files. ccc-statusd no longer
+speaks to herdr. Architecture and cutover: `DESIGN.md`.
+
+```sh
+ccc-herdr check [sid]     # config diagnostics + exact wire lines (exit 1 on diags)
+ccc-herdr paint [sid]     # force a repaint now
+ccc-herdr painter run     # the resident loop (launchd: contrib/*.plist)
+```
+
+Config: `$UCC_HOME/config/ccc-herdr.toml`, hot-reloaded on save. Missing file
+= built-in defaults (the classic id/session/role/name row).

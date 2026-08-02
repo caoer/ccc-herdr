@@ -40,7 +40,7 @@ without a herdr-side change.
 
 `$UCC_HOME/config/ccc-herdr.toml` (override: `CCC_HERDR_CONFIG`). Same
 `{{VAR}}` vocabulary as the statusd table plus cache-derived additions
-(`STATUS`, `CONTEXT_PERCENT`, `CONTEXT_TOKENS`, `COST`). Missing file =
+(`STATUS`, `CONTEXT_PERCENT`, `CONTEXT_TOKENS`, `COST`, `IDLE`). Missing file =
 built-in defaults; wrong-typed keys warn and keep defaults (loud degrade,
 `ccc-herdr check` prints the same diagnostics the painter logs).
 
