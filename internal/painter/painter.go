@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -87,8 +86,12 @@ type Painter struct {
 	livePanesSock string
 	livePanesAt   time.Time
 
-	sweeping     atomic.Bool
-	sweepPending atomic.Bool
+	// sweepMu makes acquire/release/record one critical section — two
+	// independent atomics left a window where a coalesced request landed
+	// after the release check and stranded until the next ticker.
+	sweepMu      sync.Mutex
+	sweeping     bool
+	sweepPending bool
 }
 
 func New(cfgPath string, logger *log.Logger) *Painter {
@@ -261,19 +264,27 @@ func (p *Painter) paneKnownDead(paneID, sockPath string) bool {
 }
 
 // Sweep repaints every live session: lease renewal, decay, takeover.
-// Overlapping requests coalesce into ONE deferred re-run — reconnect and
+// Overlapping requests coalesce into a deferred re-run — reconnect and
 // config edges are edge-triggered, so a dropped request would lose the edge.
 func (p *Painter) Sweep() {
-	if !p.sweeping.CompareAndSwap(false, true) {
-		p.sweepPending.Store(true)
+	p.sweepMu.Lock()
+	if p.sweeping {
+		p.sweepPending = true
+		p.sweepMu.Unlock()
 		return
 	}
-	p.sweepPending.Store(false)
-	p.sweepOnce()
-	p.sweeping.Store(false)
-	if p.sweepPending.CompareAndSwap(true, false) {
-		go p.Sweep() // an edge arrived mid-sweep — run once more
+	p.sweeping = true
+	for {
+		p.sweepPending = false
+		p.sweepMu.Unlock()
+		p.sweepOnce()
+		p.sweepMu.Lock()
+		if !p.sweepPending {
+			break
+		}
 	}
+	p.sweeping = false
+	p.sweepMu.Unlock()
 }
 
 func (p *Painter) sweepOnce() {
@@ -288,16 +299,18 @@ func (p *Painter) sweepOnce() {
 	sessionMap := facts.LoadSessionMap() // once per sweep, not per session
 	livePanes, liveSock, liveOK := p.refreshLivePanes()
 
-	// Pass 1: read fresh bound caches; one winner per pane. A pane claimed
-	// by several session caches (churned panes re-used) is painted only by
-	// the claimant with the most recent hook activity — same-source seq
-	// ordering would otherwise let a dead session's row overwrite the live
-	// one's every sweep.
+	// Pass 1: read fresh bound caches; one winner per (socket, pane). A pane
+	// claimed by several session caches (churned panes re-used) is painted
+	// only by the claimant with the most recent hook activity — same-source
+	// seq ordering would otherwise let a dead session's row overwrite the
+	// live one's every sweep. Keyed with the socket because pane ids are
+	// per-herdr-instance: two instances both have a w1:p1.
 	type claimant struct {
 		sid   string
 		cache facts.Cache
 	}
-	best := map[string]claimant{}
+	type paneKey struct{ sock, pane string }
+	best := map[paneKey]claimant{}
 	seen := map[string]bool{}
 	now := time.Now()
 	vetoed := 0
@@ -323,8 +336,9 @@ func (p *Painter) sweepOnce() {
 			vetoed++
 			continue // pane is gone — labels decay via TTL
 		}
-		if cur, taken := best[cache.HerdrPaneID]; !taken || cache.LastHookEvent.After(cur.cache.LastHookEvent) {
-			best[cache.HerdrPaneID] = claimant{sid, cache}
+		k := paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}
+		if cur, taken := best[k]; !taken || cache.LastHookEvent.After(cur.cache.LastHookEvent) {
+			best[k] = claimant{sid, cache}
 		}
 	}
 	if vetoed > 0 {
@@ -394,9 +408,14 @@ func (p *Painter) paintIdentity(st *sessState, cfg Config, cache facts.Cache, va
 		// The failure brake holds only against the same socket incarnation
 		// (a moved inode is a restarted herdr that dropped all metadata) and
 		// only inside the cooldown — a transient failure must not outlive
-		// the lease and strand a near-static row dark forever.
+		// the lease and strand a near-static row dark forever. The cooldown
+		// honors that literally: it never exceeds half a configured lease.
+		cooldown := failureRetryCooldown
+		if cfg.TTL > 0 && cfg.TTL/2 < cooldown {
+			cooldown = cfg.TTL / 2
+		}
 		braked := hash == st.failedHash && dev == st.failedDev && ino == st.failedIno &&
-			now.Sub(st.failedAt) < failureRetryCooldown
+			now.Sub(st.failedAt) < cooldown
 		if braked {
 			return
 		}

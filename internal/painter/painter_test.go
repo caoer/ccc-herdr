@@ -427,7 +427,10 @@ func TestSweepBoundedAgainstWedgedHerdr(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("sweep must be bounded against a wedged herdr")
 	}
-	if p.sweeping.Load() {
+	p.sweepMu.Lock()
+	stuck := p.sweeping
+	p.sweepMu.Unlock()
+	if stuck {
 		t.Fatal("sweep guard must release")
 	}
 }
@@ -444,5 +447,23 @@ func TestLivenessVetoScopedToSocket(t *testing.T) {
 	drain(lines)
 	if got := drain(otherLines); len(got) == 0 {
 		t.Fatal("a session on another herdr socket must not be vetoed by this socket's snapshot")
+	}
+}
+
+func TestClaimantElectionScopedToSocket(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	// Two LIVE sessions on different herdr instances sharing pane id p1
+	// (pane ids are per-instance) — both must paint; keying the election on
+	// pane id alone would silently drop one.
+	otherSock, otherLines := stubHerdr(t)
+	writeSessCache(t, "instancea00000000", "p1", sock, 0)
+	writeSessCache(t, "instanceb00000000", "p1", otherSock, 0)
+
+	p.Sweep()
+	if got := drain(lines); len(got) < 2 { // snapshot probe + at least identity
+		t.Fatalf("probed-socket session must paint, got %d lines", len(got))
+	}
+	if got := drain(otherLines); len(got) == 0 {
+		t.Fatal("second instance's claimant must paint too — election must key on (socket, pane)")
 	}
 }
