@@ -16,6 +16,14 @@
 	<true/>
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
+	<!-- fsnotify's kqueue backend opens one fd per file in the watched cache
+	     dir (hundreds of session files); launchd's default soft limit (256)
+	     would exhaust in silence. -->
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>65536</integer>
+	</dict>
 	<key>StandardOutPath</key>
 	<string>/tmp/ccc-herdr-painter.log</string>
 	<key>StandardErrorPath</key>

@@ -54,9 +54,11 @@ func uccHome() string {
 }
 
 // CacheDir is the statusd session-cache directory (one JSON per session).
+// Cleaned: callers compare it against filepath.Dir of fsnotify event paths,
+// and a trailing slash in the env var would silently fail every comparison.
 func CacheDir() string {
 	if dir := strings.TrimSpace(os.Getenv("CCC_CACHE_DIR")); dir != "" {
-		return dir
+		return filepath.Clean(dir)
 	}
 	base := uccHome()
 	if base == "" {
@@ -68,7 +70,7 @@ func CacheDir() string {
 // SessionMapPath mirrors ccc-cli's cachePath resolution.
 func SessionMapPath() string {
 	if override := strings.TrimSpace(os.Getenv("CCC_CLI_CACHE_DIR")); override != "" {
-		return filepath.Join(override, "session-map.json")
+		return filepath.Join(filepath.Clean(override), "session-map.json")
 	}
 	base := uccHome()
 	if base == "" {

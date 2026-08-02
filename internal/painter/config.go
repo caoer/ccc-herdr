@@ -151,6 +151,12 @@ func resolveConfig(raw map[string]any, diag Diag) Config {
 			switch key {
 			case "blocked_label":
 				resolveString(&cfg.AUQLabel, "auq."+key, v, true, diag)
+				// herdr drops a label that normalizes to empty and then
+				// rejects the whole report — whitespace means disable.
+				if cfg.AUQLabel != "" && strings.TrimSpace(cfg.AUQLabel) == "" {
+					diag("[auq.blocked_label]: whitespace-only — treating as disabled (\"\")")
+					cfg.AUQLabel = ""
+				}
 			case "lease":
 				resolveDuration(&cfg.AUQLease, "auq.lease", v, diag)
 			default:
@@ -193,6 +199,11 @@ func resolveString(dst *string, key string, raw any, allowEmpty bool, diag Diag)
 	*dst = s
 }
 
+// herdrMaxTTL is herdr's ttl_ms ceiling (86,400,000 ms) — a larger lease is
+// rejected on EVERY send (invalid_metadata_ttl), darkening the whole fleet
+// from one config edit, so the resolver bounds it here with a diagnostic.
+const herdrMaxTTL = 24 * time.Hour
+
 func resolveDuration(dst *time.Duration, key string, raw any, diag Diag) {
 	s, ok := raw.(string)
 	if !ok {
@@ -203,6 +214,10 @@ func resolveDuration(dst *time.Duration, key string, raw any, diag Diag) {
 	if err != nil || d < 0 {
 		diag("[%s] %q: not a valid duration — keeping default %s", key, s, *dst)
 		return
+	}
+	if d > herdrMaxTTL {
+		diag("[%s] %q: herdr caps metadata TTL at 24h — clamped", key, s)
+		d = herdrMaxTTL
 	}
 	*dst = d
 }

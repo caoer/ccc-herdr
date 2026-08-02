@@ -107,13 +107,13 @@ func runCheck(args []string) int {
 		if ok {
 			line, err := herdr.WireLine(report)
 			if err == nil {
-				fmt.Printf("%s identity: %s\n", sid[:8], line)
+				fmt.Printf("%s identity: %s\n", shortID(sid), line)
 			}
 		}
 		if cfg.AUQLabel != "" {
 			line, err := herdr.WireLine(painter.ComposeAUQ(cache.HerdrPaneID, cfg, cache.AUQPending))
 			if err == nil {
-				fmt.Printf("%s auq:      %s\n", sid[:8], line)
+				fmt.Printf("%s auq:      %s\n", shortID(sid), line)
 			}
 		}
 	}
@@ -132,6 +132,10 @@ func runPaint(args []string) int {
 	if len(args) > 0 {
 		arg = args[0]
 	}
+	if cfg := painter.LoadConfig(painter.ConfigPath(), nil); !cfg.Enabled {
+		fmt.Fprintln(os.Stderr, "ccc-herdr: painter disabled (enabled = false) — nothing painted")
+		return 1
+	}
 	ids, err := resolveSessionIDs(arg)
 	if err != nil {
 		return fail(err)
@@ -149,4 +153,12 @@ func runPaint(args []string) int {
 	}
 	fmt.Printf("painted %d session(s)\n", painted)
 	return 0
+}
+
+// shortID trims a session id for display without assuming its length.
+func shortID(sid string) string {
+	if len(sid) > 8 {
+		return sid[:8]
+	}
+	return sid
 }

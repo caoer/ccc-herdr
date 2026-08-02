@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -32,16 +33,25 @@ const (
 	// staleSession stops sweeping sessions whose cache went quiet — their
 	// labels decay via TTL; a new cache write revives them instantly.
 	staleSession = 48 * time.Hour
+	// livePanesTTL bounds how stale the pane-liveness set may be for the
+	// event path; the sweep refreshes it every interval anyway.
+	livePanesTTL = 5 * time.Minute
 )
 
-// sessState is the in-memory dedup state for one session. The statusd
-// sidecar files existed only because its writers were short-lived processes;
-// a resident painter holds this in memory and repaints all on start.
+// sessState is the in-memory dedup state for one session. Its own mutex
+// covers the whole compose→decide→send→record window — Repaint is reachable
+// concurrently from debounce timers, sweeps, and the CLI (statusd used a
+// flock for exactly this window).
 type sessState struct {
+	mu               sync.Mutex
 	hash             string
 	sentAt           time.Time
 	sockDev, sockIno uint64
-	failedHash       string // last compose that herdr rejected — don't retry until content changes
+	// failedHash + the socket identity it failed against: don't retry the
+	// exact content herdr rejected — but a moved socket inode is a restarted
+	// herdr whose metadata is gone, so the brake releases with it.
+	failedHash           string
+	failedDev, failedIno uint64
 
 	title   string
 	titleAt time.Time
@@ -59,6 +69,14 @@ type Painter struct {
 	cfg      Config
 	sessions map[string]*sessState
 	timers   map[string]*time.Timer
+
+	// Pane-liveness set from the last snapshot fetch (sweep-refreshed): a
+	// cache binding whose pane is gone must not be painted — 48h of session
+	// churn otherwise leaves hundreds of dead bindings fighting live panes.
+	livePanes   map[string]bool
+	livePanesAt time.Time
+
+	sweeping atomic.Bool
 }
 
 func New(cfgPath string, logger *log.Logger) *Painter {
@@ -74,8 +92,6 @@ func New(cfgPath string, logger *log.Logger) *Painter {
 
 // Run is the resident loop; it returns when ctx is canceled.
 func (p *Painter) Run(ctx context.Context) error {
-	p.reloadConfig()
-
 	cacheDir := facts.CacheDir()
 	if cacheDir == "" {
 		p.Log.Printf("no cache dir resolvable (UCC_HOME unset?) — nothing to paint")
@@ -101,10 +117,10 @@ func (p *Painter) Run(ctx context.Context) error {
 	}
 
 	go p.herdrLink(ctx)
+	go p.Sweep() // start = repaint all (fresh memory always sends)
 
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
-	p.Sweep() // start = repaint all (fresh memory always sends)
 
 	for {
 		select {
@@ -121,29 +137,34 @@ func (p *Painter) Run(ctx context.Context) error {
 			}
 			p.Log.Printf("watcher: %v", err)
 		case <-ticker.C:
-			p.Sweep()
+			// Off the event loop: a sweep over a large fleet must never
+			// stall fsnotify delivery (the channel is unbuffered).
+			go p.Sweep()
 		}
 	}
 }
 
 func (p *Painter) handleEvent(ev fsnotify.Event) {
-	if ev.Name == p.CfgPath && ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
+	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+		return
+	}
+	if filepath.Clean(ev.Name) == p.CfgPath {
 		p.Log.Printf("config changed — reloading")
 		p.reloadConfig()
 		go p.Sweep()
 		return
 	}
-	if !strings.HasSuffix(ev.Name, ".json") || filepath.Dir(ev.Name) != facts.CacheDir() {
-		return
-	}
-	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+	if !strings.HasSuffix(ev.Name, ".json") || filepath.Dir(filepath.Clean(ev.Name)) != facts.CacheDir() {
 		return
 	}
 	sid := strings.TrimSuffix(filepath.Base(ev.Name), ".json")
 	p.debounced(sid)
 }
 
-// debounced schedules one repaint per session per debounce window.
+// debounced schedules one repaint per session per debounce window. The
+// callback deletes only ITS OWN map entry — Reset can revive an
+// already-fired AfterFunc, and its late invocation must not delete a
+// successor timer's entry.
 func (p *Painter) debounced(sid string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -151,12 +172,16 @@ func (p *Painter) debounced(sid string) {
 		t.Reset(debounce)
 		return
 	}
-	p.timers[sid] = time.AfterFunc(debounce, func() {
+	var t *time.Timer
+	t = time.AfterFunc(debounce, func() {
 		p.mu.Lock()
-		delete(p.timers, sid)
+		if p.timers[sid] == t {
+			delete(p.timers, sid)
+		}
 		p.mu.Unlock()
 		p.Repaint(sid, false)
 	})
+	p.timers[sid] = t
 }
 
 func (p *Painter) reloadConfig() {
@@ -185,8 +210,49 @@ func (p *Painter) state(sid string) *sessState {
 	return s
 }
 
+// refreshLivePanes fetches herdr's pane set once (one snapshot per sweep).
+// ok=false means herdr is unreachable — sends would fail anyway, and the
+// event path falls back to its last known set.
+func (p *Painter) refreshLivePanes() (map[string]bool, bool) {
+	client, err := herdr.NewClient()
+	if err != nil {
+		return nil, false
+	}
+	snap, err := client.Snapshot()
+	if err != nil || snap == nil {
+		return nil, false
+	}
+	live := make(map[string]bool, len(snap.Panes))
+	for _, pane := range snap.Panes {
+		live[pane.PaneID] = true
+	}
+	p.mu.Lock()
+	p.livePanes = live
+	p.livePanesAt = time.Now()
+	p.mu.Unlock()
+	return live, true
+}
+
+// paneKnownDead consults the last liveness set for the event path; unknown
+// or stale data never blocks a paint (the dedup brake handles dead sends).
+func (p *Painter) paneKnownDead(paneID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.livePanes == nil || time.Since(p.livePanesAt) > livePanesTTL {
+		return false
+	}
+	return !p.livePanes[paneID]
+}
+
 // Sweep repaints every live session: lease renewal, decay, takeover.
+// Overlapping sweeps coalesce (CAS) — reconnect, config, and ticker edges
+// may all fire together.
 func (p *Painter) Sweep() {
+	if !p.sweeping.CompareAndSwap(false, true) {
+		return
+	}
+	defer p.sweeping.Store(false)
+
 	dir := facts.CacheDir()
 	if dir == "" {
 		return
@@ -195,6 +261,19 @@ func (p *Painter) Sweep() {
 	if err != nil {
 		return
 	}
+	sessionMap := facts.LoadSessionMap() // once per sweep, not per session
+	livePanes, liveOK := p.refreshLivePanes()
+
+	// Pass 1: read fresh bound caches; one winner per pane. A pane claimed
+	// by several session caches (churned panes re-used) is painted only by
+	// the claimant with the most recent hook activity — same-source seq
+	// ordering would otherwise let a dead session's row overwrite the live
+	// one's every sweep.
+	type claimant struct {
+		sid   string
+		cache facts.Cache
+	}
+	best := map[string]claimant{}
 	seen := map[string]bool{}
 	now := time.Now()
 	for _, e := range entries {
@@ -208,8 +287,21 @@ func (p *Painter) Sweep() {
 		}
 		sid := strings.TrimSuffix(name, ".json")
 		seen[sid] = true
-		p.Repaint(sid, false)
+		cache, err := facts.ReadCache(filepath.Join(dir, name))
+		if err != nil || cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
+			continue
+		}
+		if liveOK && !livePanes[cache.HerdrPaneID] {
+			continue // pane is gone — labels decay via TTL
+		}
+		if cur, taken := best[cache.HerdrPaneID]; !taken || cache.LastHookEvent.After(cur.cache.LastHookEvent) {
+			best[cache.HerdrPaneID] = claimant{sid, cache}
+		}
 	}
+	for _, c := range best {
+		p.repaint(c.sid, c.cache, sessionMap[c.sid], false)
+	}
+
 	// Forget sessions whose cache file is gone — their labels TTL out.
 	p.mu.Lock()
 	for sid := range p.sessions {
@@ -220,18 +312,29 @@ func (p *Painter) Sweep() {
 	p.mu.Unlock()
 }
 
-// Repaint composes and (dedup permitting) sends both reports for one session.
+// Repaint is the single-session entry (debounce path, CLI). force bypasses
+// dedup and the pane-liveness veto.
 func (p *Painter) Repaint(sid string, force bool) {
-	cfg := p.config()
-	if !cfg.Enabled {
-		return
-	}
 	cache, err := facts.ReadCache(filepath.Join(facts.CacheDir(), sid+".json"))
 	if err != nil || cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
 		return
 	}
-	entry := facts.LoadSessionMap()[sid]
+	if !force && p.paneKnownDead(cache.HerdrPaneID) {
+		return
+	}
+	p.repaint(sid, cache, facts.LoadSessionMap()[sid], force)
+}
+
+// repaint composes and (dedup permitting) sends both reports. The per-
+// session lock spans the whole sample→compose→decide→send→record window.
+func (p *Painter) repaint(sid string, cache facts.Cache, entry facts.MapEntry, force bool) {
+	cfg := p.config()
+	if !cfg.Enabled {
+		return
+	}
 	st := p.state(sid)
+	st.mu.Lock()
+	defer st.mu.Unlock()
 
 	vars := facts.Vars(sid, cache, entry)
 	if configReferencesVar(cfg, "HERDR_TITLE") {
@@ -256,15 +359,17 @@ func (p *Painter) paintIdentity(st *sessState, cfg Config, cache facts.Cache, va
 	hash := report.ContentHash()
 	now := time.Now()
 	if !force {
-		if hash == st.failedHash {
-			return // herdr rejected this exact content — wait for a change
+		// The failure brake holds only against the same socket incarnation:
+		// a moved inode is a restarted herdr that dropped all metadata.
+		if hash == st.failedHash && dev == st.failedDev && ino == st.failedIno {
+			return
 		}
 		if !shouldSend(st, hash, dev, ino, now, cfg.TTL) {
 			return
 		}
 	}
 	if err := herdr.SendReport(cache.HerdrSocketPath, report); err != nil {
-		st.failedHash = hash
+		st.failedHash, st.failedDev, st.failedIno = hash, dev, ino
 		p.Log.Printf("identity %s → %s: %v", cache.SessionID, cache.HerdrPaneID, err)
 		return
 	}
@@ -281,17 +386,20 @@ func (p *Painter) paintAUQ(st *sessState, cfg Config, cache facts.Cache, force b
 	pending := cache.AUQPending
 	now := time.Now()
 	edge := pending != st.lastPending // includes the -1 fresh state: takeover clears stale labels
-	renew := pending > 0 && now.Sub(st.auqSentAt) > cfg.AUQLease/4
+	renew := pending > 0 && cfg.AUQLease > 0 && now.Sub(st.auqSentAt) > cfg.AUQLease/4
 	if !force && !edge && !renew {
 		return
 	}
-	report := ComposeAUQ(cache.HerdrPaneID, cfg, pending)
-	if err := herdr.SendReport(cache.HerdrSocketPath, report); err != nil {
-		p.Log.Printf("auq %s → %s: %v", cache.SessionID, cache.HerdrPaneID, err)
-		return
-	}
+	err := herdr.SendReport(cache.HerdrSocketPath, ComposeAUQ(cache.HerdrPaneID, cfg, pending))
+	// Advance state even on failure: the lease TTL is the AUQ self-heal
+	// contract, so a failed paint retries at renewal cadence (or the next
+	// real edge) — never per cache write, which on a dead pane is a
+	// permanent resend storm.
 	st.lastPending = pending
 	st.auqSentAt = now
+	if err != nil {
+		p.Log.Printf("auq %s → %s: %v", cache.SessionID, cache.HerdrPaneID, err)
+	}
 }
 
 // shouldSend is the dedup decision: content changed, herdr restarted (socket
@@ -351,9 +459,9 @@ func configReferencesVar(cfg Config, name string) bool {
 }
 
 // herdrLink holds a subscribed connection to the herdr socket as a liveness
-// probe: herdr drops all metadata on restart, so every (re)connect triggers a
-// full repaint. Event content is irrelevant — the connection lifecycle is the
-// signal; dedup's socket-inode check backstops anything missed.
+// probe: herdr drops all metadata on restart, so every reconnect triggers a
+// full repaint. Event content is irrelevant — the connection lifecycle is
+// the signal; dedup's socket-inode check backstops anything missed.
 func (p *Painter) herdrLink(ctx context.Context) {
 	socketPath := os.Getenv("HERDR_SOCKET_PATH")
 	if socketPath == "" {
@@ -368,10 +476,8 @@ func (p *Painter) herdrLink(ctx context.Context) {
 		conn, err := net.Dial("unix", socketPath)
 		if err != nil {
 			first = false
-			select {
-			case <-ctx.Done():
+			if !sleepCtx(ctx, 2*time.Second) {
 				return
-			case <-time.After(2 * time.Second):
 			}
 			continue
 		}
@@ -393,6 +499,20 @@ func (p *Painter) herdrLink(ctx context.Context) {
 			}
 		}
 		conn.Close()
+		// Floor between redials: an accept-then-close herdr must not spin
+		// the loop (each reconnect arms a full-fleet sweep).
+		if !sleepCtx(ctx, time.Second) {
+			return
+		}
+	}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
 
