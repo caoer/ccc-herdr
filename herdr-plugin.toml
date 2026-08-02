@@ -1,0 +1,24 @@
+id = "ccc-herdr"
+name = "CCC Herdr"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "ccc fleet companion: fuzzy-jump to any agent or pane by id, name, title, or role."
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["go", "build", "-o", "./bin/ccc-herdr", "."]
+
+[[actions]]
+id = "jump"
+title = "CCC: jump to agent"
+description = "Fuzzy-find an agent or pane and jump to it."
+contexts = ["tab", "pane"]
+command = ["./bin/ccc-herdr", "jump"]
+
+[[panes]]
+id = "jumper"
+title = "Jump to agent"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["./bin/ccc-herdr", "jumper"]
