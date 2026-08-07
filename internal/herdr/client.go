@@ -150,6 +150,44 @@ func (c *Client) FocusPane(paneID string) error {
 	return c.call("pane.focus", map[string]any{"pane_id": paneID}, nil)
 }
 
+// PaneRead returns the pane's terminal text. source is a wire value:
+// visible, recent, or recent_unwrapped.
+func (c *Client) PaneRead(paneID, source string, lines int) (string, error) {
+	params := map[string]any{"pane_id": paneID, "source": source}
+	if lines > 0 {
+		params["lines"] = lines
+	}
+	var result struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	if err := c.call("pane.read", params, &result); err != nil {
+		return "", err
+	}
+	return result.Read.Text, nil
+}
+
+// PluginPaneOpen opens a manifest pane entrypoint. placement overrides the
+// manifest default when non-empty; targetPaneID seats split placements;
+// workspaceID seats tab placements; env is merged into the pane's launch env.
+func (c *Client) PluginPaneOpen(pluginID, entrypoint, placement, targetPaneID, workspaceID string, env map[string]string) error {
+	params := map[string]any{"plugin_id": pluginID, "entrypoint": entrypoint, "focus": true}
+	if placement != "" {
+		params["placement"] = placement
+	}
+	if targetPaneID != "" {
+		params["target_pane_id"] = targetPaneID
+	}
+	if workspaceID != "" {
+		params["workspace_id"] = workspaceID
+	}
+	if len(env) > 0 {
+		params["env"] = env
+	}
+	return c.call("plugin.pane.open", params, nil)
+}
+
 // Notify shows a toast; failures are ignored.
 func (c *Client) Notify(title, body string) {
 	params := map[string]any{"title": title, "body": body, "sound": "none"}

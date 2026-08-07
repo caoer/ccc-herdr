@@ -15,6 +15,13 @@ description = "Fuzzy-find an agent or pane and jump to it."
 contexts = ["tab", "pane"]
 command = ["./bin/ccc-herdr", "jump"]
 
+[[actions]]
+id = "openfile"
+title = "CCC: open file"
+description = "Fuzzy-find a file path in the pane's output and open it in the editor."
+contexts = ["tab", "pane"]
+command = ["./bin/ccc-herdr", "openfile"]
+
 [[panes]]
 id = "jumper"
 title = "Jump to agent"
@@ -22,3 +29,16 @@ placement = "popup"
 width = "70%"
 height = 20
 command = ["./bin/ccc-herdr", "jumper"]
+
+[[panes]]
+id = "filepicker"
+title = "Open file"
+placement = "popup"
+width = "70%"
+height = 20
+command = ["./bin/ccc-herdr", "filepicker"]
+
+[[panes]]
+id = "opener"
+title = "Editor"
+command = ["./bin/ccc-herdr", "open-exec"]
