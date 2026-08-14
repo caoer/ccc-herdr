@@ -15,8 +15,11 @@ import (
 // agent — one resolver, so check can never disagree with runtime.
 type Diag func(format string, args ...any)
 
-// Config is the effective ccc-herdr.toml configuration. Template values
-// ({{VAR}}) are expanded at compose time, not here.
+// Config is the effective ccc-herdr configuration. Template values
+// ({{VAR}}) are expanded at compose time, not here. Star is non-nil when the
+// config came from a .star file — the per-pane surfaces (tokens,
+// display_agent, params) then come from its render(v) function and the
+// template fields stay empty.
 type Config struct {
 	Enabled      bool
 	Method       string
@@ -25,6 +28,7 @@ type Config struct {
 	DisplayAgent string
 	Tokens       map[string]string
 	Params       map[string]any
+	Star         *StarProgram
 
 	AUQLabel string        // state_labels{blocked} text; "" disables the AUQ writer
 	AUQLease time.Duration // blocked-label lease, renewed by the sweep
@@ -51,8 +55,8 @@ func DefaultConfig() Config {
 }
 
 // ConfigPath resolves the config file: $CCC_HERDR_CONFIG, else
-// $UCC_HOME/config/ccc-herdr.toml. Cleaned — hot-reload compares this
-// against cleaned fsnotify event paths.
+// $UCC_HOME/config/ccc-herdr.star when one exists, else the TOML sibling.
+// Cleaned — hot-reload compares this against cleaned fsnotify event paths.
 func ConfigPath() string {
 	if p := strings.TrimSpace(os.Getenv("CCC_HERDR_CONFIG")); p != "" {
 		return filepath.Clean(p)
@@ -65,12 +69,17 @@ func ConfigPath() string {
 		}
 		base = filepath.Join(home, ".local", "share", "ucc")
 	}
+	star := filepath.Join(base, "config", "ccc-herdr.star")
+	if _, err := os.Stat(star); err == nil {
+		return star
+	}
 	return filepath.Join(base, "config", "ccc-herdr.toml")
 }
 
-// LoadConfig reads and resolves the config file. A missing file is the
-// defaults (not an error); a parse failure degrades to defaults LOUDLY via
-// diag — an unreadable config must never dark a whole fleet's labels.
+// LoadConfig reads and resolves the config file — Starlark when the path
+// ends in .star, TOML otherwise. A missing file is the defaults (not an
+// error); a parse failure degrades to defaults LOUDLY via diag — an
+// unreadable config must never dark a whole fleet's labels.
 func LoadConfig(path string, diag Diag) Config {
 	if diag == nil {
 		diag = func(string, ...any) {}
@@ -81,6 +90,9 @@ func LoadConfig(path string, diag Diag) Config {
 			diag("config %s: %v — using defaults", path, err)
 		}
 		return DefaultConfig()
+	}
+	if strings.HasSuffix(path, ".star") {
+		return loadStarConfig(path, data, diag)
 	}
 	var raw map[string]any
 	if err := toml.Unmarshal(data, &raw); err != nil {

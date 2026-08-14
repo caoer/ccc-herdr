@@ -38,11 +38,21 @@ without a herdr-side change.
 
 ## Config
 
-`$UCC_HOME/config/ccc-herdr.toml` (override: `CCC_HERDR_CONFIG`). Same
-`{{VAR}}` vocabulary as the statusd table plus cache-derived additions
-(`STATUS`, `CONTEXT_PERCENT`, `CONTEXT_TOKENS`, `COST`, `IDLE`). Missing file =
-built-in defaults; wrong-typed keys warn and keep defaults (loud degrade,
-`ccc-herdr check` prints the same diagnostics the painter logs).
+`$UCC_HOME/config/ccc-herdr.star` when it exists, else
+`$UCC_HOME/config/ccc-herdr.toml` (override: `CCC_HERDR_CONFIG`, format by
+extension). Missing file = built-in defaults; a broken config degrades to
+defaults loudly (`ccc-herdr check` prints the same diagnostics the painter
+logs). The painter re-resolves the path on config-dir events, so authoring
+the .star next to a live .toml switches formats without a restart.
+
+TOML: static tables plus `{{VAR}}` templates — the statusd vocabulary plus
+cache-derived additions (`STATUS`, `CONTEXT_PERCENT`, `CONTEXT_TOKENS`,
+`COST`, `IDLE`). Starlark: `painter`/`auq` stay static dicts (same keys,
+same resolver, same diagnostics); one `render(v)` function computes the
+per-pane surfaces (`display_agent`, `tokens`, `params`) from the same facts
+as struct attributes — conditionals (per-role tokens, title omission) live
+in the config, not in new Go vars. Render is step-bounded and a render
+error skips that pane's identity report loudly, never the fleet's.
 
 Session-scope overrides (per-session table beating global) are deferred.
 

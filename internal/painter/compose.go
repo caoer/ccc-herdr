@@ -35,6 +35,24 @@ func ComposeIdentity(paneID string, cfg Config, vars map[string]string, diag Dia
 		Seq: time.Now().UnixNano(),
 	}
 
+	// Star config: render(v) owns every per-pane surface, including the
+	// empty-HERDR_TITLE omission the template path special-cases below.
+	if cfg.Star != nil {
+		displayAgent, tokens, extra, renderOK := cfg.Star.Render(vars, diag)
+		if !renderOK {
+			return herdr.Report{}, false
+		}
+		report.Tokens = tokens
+		report.Extra = extra
+		if displayAgent != "" {
+			report.DisplayAgent = herdr.ClampValue(displayAgent)
+		}
+		if report.Tokens == nil && report.Extra == nil && report.DisplayAgent == "" {
+			return herdr.Report{}, false
+		}
+		return report, true
+	}
+
 	// A template referencing {{HERDR_TITLE}} while the var is empty is omitted
 	// WHOLE — expanding it would paint a dangling "name · " or null the token;
 	// omission keeps herdr's previous value (metadata patch semantics) until a

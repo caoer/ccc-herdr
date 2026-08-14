@@ -163,17 +163,41 @@ func (p *Painter) handleEvent(ev fsnotify.Event) {
 	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
 		return
 	}
-	if filepath.Clean(ev.Name) == p.CfgPath {
+	name := filepath.Clean(ev.Name)
+	if p.isConfigEvent(name) {
+		// Re-resolve before reloading: authoring ccc-herdr.star next to the
+		// live ccc-herdr.toml (or deleting it again) switches the effective
+		// file, and painting on from the dead path would be a silent no-op.
+		resolved := ConfigPath()
+		p.mu.Lock()
+		if resolved != p.CfgPath {
+			p.Log.Printf("config path now %s", resolved)
+			p.CfgPath = resolved
+		}
+		p.mu.Unlock()
 		p.Log.Printf("config changed — reloading")
 		p.reloadConfig()
 		go p.Sweep()
 		return
 	}
-	if !strings.HasSuffix(ev.Name, ".json") || filepath.Dir(filepath.Clean(ev.Name)) != facts.CacheDir() {
+	if !strings.HasSuffix(ev.Name, ".json") || filepath.Dir(name) != facts.CacheDir() {
 		return
 	}
 	sid := strings.TrimSuffix(filepath.Base(ev.Name), ".json")
 	p.debounced(sid)
+}
+
+// isConfigEvent matches the active config path plus its format sibling in
+// the same directory — the pair a format migration flips between.
+func (p *Painter) isConfigEvent(name string) bool {
+	p.mu.Lock()
+	current := p.CfgPath
+	p.mu.Unlock()
+	if name == current {
+		return true
+	}
+	base := filepath.Base(name)
+	return (base == "ccc-herdr.star" || base == "ccc-herdr.toml") && filepath.Dir(name) == filepath.Dir(current)
 }
 
 // debounced schedules one repaint per session per debounce window. The
@@ -200,7 +224,10 @@ func (p *Painter) debounced(sid string) {
 }
 
 func (p *Painter) reloadConfig() {
-	cfg := LoadConfig(p.CfgPath, func(format string, args ...any) {
+	p.mu.Lock()
+	path := p.CfgPath
+	p.mu.Unlock()
+	cfg := LoadConfig(path, func(format string, args ...any) {
 		p.Log.Printf("config: "+format, args...)
 	})
 	p.mu.Lock()
@@ -501,8 +528,13 @@ func (p *Painter) resolveTitle(st *sessState, socketPath, paneID string, force b
 }
 
 // configReferencesVar reports whether any template mentions {{name}} —
-// tokens, display_agent, or top-level string params.
+// tokens, display_agent, or top-level string params. A star config's
+// render(v) is opaque, so it is assumed to reference everything; the
+// HERDR_TITLE fetch behind that answer stays throttled to titleFetchTTL.
 func configReferencesVar(cfg Config, name string) bool {
+	if cfg.Star != nil {
+		return true
+	}
 	needle := "{{" + name + "}}"
 	if strings.Contains(cfg.DisplayAgent, needle) {
 		return true
