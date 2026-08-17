@@ -24,9 +24,11 @@
 		<key>NumberOfFiles</key>
 		<integer>65536</integer>
 	</dict>
+	<!-- Same log the [[startup]]-hook path writes, so there is one place to
+	     look whichever started the painter. launchd does not expand ~. -->
 	<key>StandardOutPath</key>
-	<string>/tmp/ccc-herdr-painter.log</string>
+	<string>/Users/caoer115/.local/share/ucc/cache/ccc-herdr/painter.log</string>
 	<key>StandardErrorPath</key>
-	<string>/tmp/ccc-herdr-painter.log</string>
+	<string>/Users/caoer115/.local/share/ucc/cache/ccc-herdr/painter.log</string>
 </dict>
 </plist>

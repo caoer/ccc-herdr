@@ -76,6 +76,20 @@ func ConfigPath() string {
 	return filepath.Join(base, "config", "ccc-herdr.toml")
 }
 
+// ConfigNote renders the config path for logs and `check`. A missing file is
+// legal (built-in defaults) but must never be INVISIBLE: an unconfigured host
+// and a mis-pathed one look identical in the panes, so the difference has to
+// be readable without opening the source.
+func ConfigNote(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return "none resolvable (UCC_HOME unset?) — built-in defaults"
+	}
+	if _, err := os.Stat(path); err != nil {
+		return path + " (missing — built-in defaults)"
+	}
+	return path
+}
+
 // LoadConfig reads and resolves the config file — Starlark when the path
 // ends in .star, TOML otherwise. A missing file is the defaults (not an
 // error); a parse failure degrades to defaults LOUDLY via diag — an

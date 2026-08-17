@@ -21,7 +21,12 @@ edges and sweeps. Everything else already exists.
 
 ## Painter
 
-`ccc-herdr painter run` (launchd keeps it alive; flock singleton):
+`ccc-herdr painter run` (flock singleton) — started by the plugin's own
+`[[startup]]` hook via `ccc-herdr painter start`, which detaches and exits.
+herdr runs startup hooks once after session restore and again on live handoff,
+asynchronously, reading their stdout/stderr to EOF — hence detach with a log
+FILE, never an inherited pipe. herdr does not supervise: crash recovery is the
+next herdr start, or launchd KeepAlive on the mac (`contrib/*.plist`).
 
 - fsnotify on the cache dir → 300ms debounce per session → repaint
 - fsnotify on the config file → reload → repaint all
@@ -40,9 +45,10 @@ without a herdr-side change.
 
 `$UCC_HOME/config/ccc-herdr.star` when it exists, else
 `$UCC_HOME/config/ccc-herdr.toml` (override: `CCC_HERDR_CONFIG`, format by
-extension). Missing file = built-in defaults; a broken config degrades to
-defaults loudly (`ccc-herdr check` prints the same diagnostics the painter
-logs). The painter re-resolves the path on config-dir events, so authoring
+extension). Missing file = built-in defaults — panes still paint, and both
+`check` and the painter's startup line print the resolved path marked
+`(missing — built-in defaults)`. A broken config degrades to defaults loudly
+(`ccc-herdr check` prints the same diagnostics the painter logs). The painter re-resolves the path on config-dir events, so authoring
 the .star next to a live .toml switches formats without a restart.
 
 TOML: static tables plus `{{VAR}}` templates — the statusd vocabulary plus

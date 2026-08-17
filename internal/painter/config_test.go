@@ -25,6 +25,22 @@ func TestLoadConfigMissingFileIsDefaults(t *testing.T) {
 	}
 }
 
+// A missing config is legal, so it must be visible instead: an unconfigured
+// host and a mis-pathed CCC_HERDR_CONFIG paint the same defaults.
+func TestConfigNoteMarksMissingFile(t *testing.T) {
+	absent := filepath.Join(t.TempDir(), "absent.star")
+	if note := ConfigNote(absent); !strings.Contains(note, "missing") {
+		t.Fatalf("missing file must be marked, got %q", note)
+	}
+	present := writeConfig(t, "[auq]\nblocked_label = \"AUQ\"\n")
+	if note := ConfigNote(present); note != present {
+		t.Fatalf("present file must render as the bare path, got %q", note)
+	}
+	if note := ConfigNote(""); !strings.Contains(note, "defaults") {
+		t.Fatalf("unresolvable path must say defaults, got %q", note)
+	}
+}
+
 func TestLoadConfigPerKeyOverlay(t *testing.T) {
 	path := writeConfig(t, "[auq]\nblocked_label = \"问\"\n")
 	cfg := LoadConfig(path, nil)

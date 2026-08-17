@@ -52,8 +52,21 @@ speaks to herdr. Architecture and cutover: `DESIGN.md`.
 ```sh
 ccc-herdr check [sid]     # config diagnostics + exact wire lines (exit 1 on diags)
 ccc-herdr paint [sid]     # force a repaint now
-ccc-herdr painter run     # the resident loop (launchd: contrib/*.plist)
+ccc-herdr painter start   # detach the resident loop; no-op if one is up
+ccc-herdr painter run     # the resident loop, foreground
 ```
 
-Config: `$UCC_HOME/config/ccc-herdr.toml`, hot-reloaded on save. Missing file
-= built-in defaults (the classic id/session/role/name row).
+Lifecycle is plugin-owned: the `[[startup]]` hook in `herdr-plugin.toml` runs
+`painter start` once after herdr restores the session and again on live
+handoff, so an installed+enabled plugin paints on a fresh host with nothing
+hand-started. `painter start` detaches (setsid, log to
+`$UCC_HOME/cache/ccc-herdr/painter.log`) and is idempotent through the flock
+singleton. herdr does not supervise it: a crashed painter stays down until the
+next herdr start or a hand `painter start`. `contrib/dev.ccc.herdr-painter.plist`
+adds macOS launchd KeepAlive supervision on top; the flock keeps both safe.
+
+Config: `$UCC_HOME/config/ccc-herdr.star`, else `ccc-herdr.toml`, hot-reloaded
+on save. Missing file = built-in defaults (the classic id/session/role/name
+row) — panes still paint. `ccc-herdr check` prints the resolved path and marks
+it `(missing — built-in defaults)` so an unconfigured host is not mistaken for
+a broken one.

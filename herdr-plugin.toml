@@ -8,6 +8,13 @@ platforms = ["linux", "macos"]
 [[build]]
 command = ["go", "build", "-o", "./bin/ccc-herdr", "."]
 
+# The painter is a resident process, so the plugin owns its lifecycle: herdr
+# runs [[startup]] once per enabled plugin after session restore and again on
+# live handoff. `painter start` detaches and exits (flock singleton, so a
+# second run no-ops) — herdr never supervises it.
+[[startup]]
+command = ["./bin/ccc-herdr", "painter", "start"]
+
 [[actions]]
 id = "jump"
 title = "CCC: jump to agent"

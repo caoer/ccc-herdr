@@ -9,7 +9,9 @@
 //
 // Painter (phase 2):
 //
-//	ccc-herdr painter run    resident pane-label painter
+//	ccc-herdr painter run    resident pane-label painter (foreground)
+//	ccc-herdr painter start  detach the resident painter; no-op if one is up
+//	                         (the herdr [[startup]] hook calls this)
 //	ccc-herdr check [sid]    config diagnostics + the exact wire line(s)
 //	ccc-herdr paint [sid]    force one repaint (all sessions without sid)
 //
@@ -64,7 +66,7 @@ func main() {
 	case "open-exec":
 		code = runOpenExec()
 	default:
-		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list|painter run|check [sid]|paint [sid]|openfile|filepicker|open-exec")
+		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list|painter run|painter start|check [sid]|paint [sid]|openfile|filepicker|open-exec")
 		code = 2
 	}
 	os.Exit(code)

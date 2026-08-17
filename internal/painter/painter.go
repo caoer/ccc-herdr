@@ -610,14 +610,33 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// StateDir is the painter's own directory (lock, log), a sibling of the
+// statusd cache dir. "" when no cache dir resolves.
+func StateDir() string {
+	base := facts.CacheDir()
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(base), "ccc-herdr")
+}
+
+// LogPath is where a detached painter writes (`painter start`). Never /tmp:
+// the log outlives the boot that produced the bug.
+func LogPath() string {
+	dir := StateDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "painter.log")
+}
+
 // AcquireSingleton takes the painter flock; ok=false means another painter
 // is live (two same-source writers would flap seq ordering).
 func AcquireSingleton() (release func(), ok bool) {
-	base := facts.CacheDir()
-	if base == "" {
+	dir := StateDir()
+	if dir == "" {
 		return func() {}, true
 	}
-	dir := filepath.Join(filepath.Dir(base), "ccc-herdr")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return func() {}, true
 	}

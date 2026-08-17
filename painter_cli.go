@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -15,12 +16,71 @@ import (
 	"github.com/caoer/ccc-herdr/internal/painter"
 )
 
-// runPainter is the resident loop: `ccc-herdr painter run`.
+// runPainter dispatches the painter verbs: `run` (resident loop, foreground)
+// and `start` (idempotent detach — what the herdr [[startup]] hook calls).
 func runPainter(args []string) int {
-	if len(args) == 0 || args[0] != "run" {
-		fmt.Fprintln(os.Stderr, "usage: ccc-herdr painter run")
+	verb := ""
+	if len(args) > 0 {
+		verb = args[0]
+	}
+	switch verb {
+	case "run":
+		return runPainterLoop()
+	case "start":
+		return startPainter()
+	default:
+		fmt.Fprintln(os.Stderr, "usage: ccc-herdr painter run|start")
 		return 2
 	}
+}
+
+// startPainter launches the resident loop detached and exits — herdr's
+// [[startup]] hook is one-shot, not a supervisor, and it reads the hook's
+// stdout/stderr pipes to EOF. So the child gets its own session (setsid) and
+// a log FILE: an inherited pipe would leave herdr's reader threads (and the
+// plugin command log entry) hanging for the painter's whole life.
+// Idempotent by flock probe — a second herdr server, a live handoff, or a
+// hand start finds the painter already up and no-ops.
+func startPainter() int {
+	release, free := painter.AcquireSingleton()
+	if !free {
+		fmt.Println("ccc-herdr: painter already running")
+		return 0
+	}
+	release() // the child takes the lock for real
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fail(err)
+	}
+	var out *os.File
+	logPath := painter.LogPath()
+	if logPath == "" {
+		fmt.Fprintln(os.Stderr, "ccc-herdr: no cache dir resolvable (UCC_HOME unset?) — painter log discarded")
+		out, err = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	} else if err = os.MkdirAll(filepath.Dir(logPath), 0o755); err == nil {
+		out, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	}
+	if err != nil {
+		return fail(err)
+	}
+	defer out.Close()
+
+	cmd := exec.Command(exe, "painter", "run")
+	cmd.Stdout = out
+	cmd.Stderr = out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fail(err)
+	}
+	pid := cmd.Process.Pid // Release() zeroes it — read first
+	_ = cmd.Process.Release()
+	fmt.Printf("ccc-herdr: painter started (pid %d) — log %s\n", pid, logPath)
+	return 0
+}
+
+// runPainterLoop is the resident loop: `ccc-herdr painter run`.
+func runPainterLoop() int {
 	release, ok := painter.AcquireSingleton()
 	if !ok {
 		fmt.Fprintln(os.Stderr, "ccc-herdr: another painter is already running")
@@ -30,7 +90,7 @@ func runPainter(args []string) int {
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 	p := painter.New(painter.ConfigPath(), logger)
-	logger.Printf("painter up — config %s, cache %s", p.CfgPath, facts.CacheDir())
+	logger.Printf("painter up — config %s, cache %s", painter.ConfigNote(p.CfgPath), facts.CacheDir())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -75,6 +135,7 @@ func runCheck(args []string) int {
 		arg = args[0]
 	}
 	diags := 0
+	fmt.Printf("config: %s\n", painter.ConfigNote(painter.ConfigPath()))
 	cfg := painter.LoadConfig(painter.ConfigPath(), func(format string, a ...any) {
 		diags++
 		fmt.Fprintf(os.Stderr, "diag: "+format+"\n", a...)
