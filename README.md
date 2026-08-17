@@ -63,7 +63,9 @@ handoff, so an installed+enabled plugin paints on a fresh host with nothing
 hand-started. `painter start` detaches (setsid, log to
 `$UCC_HOME/cache/ccc-herdr/painter.log`) and is idempotent through the flock
 singleton. herdr does not supervise it: a crashed painter stays down until the
-next herdr start or a hand `painter start`. `contrib/dev.ccc.herdr-painter.plist`
+next herdr start or a hand `painter start`. It retires itself once every herdr
+socket its bindings name has been unreachable for three sweeps (~3 min), so a
+host with no herdr left keeps no resident holding the lock. `contrib/dev.ccc.herdr-painter.plist`
 adds macOS launchd KeepAlive supervision on top; the flock keeps both safe.
 
 Upgrading the plugin does NOT upgrade the running painter: the old process

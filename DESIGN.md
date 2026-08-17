@@ -38,6 +38,8 @@ that launched the painter goes away.
 - fsnotify on the cache dir → 300ms debounce per session → repaint
 - fsnotify on the config file → reload → repaint all
 - 60s sweep → lease renewal (identity TTL half-life, AUQ lease), decay
+- 3 consecutive sweeps with bindings but zero reachable sockets → exit (a
+  herdr start re-runs the [[startup]] hook; zero bindings never retires)
 - a held herdr connection (events.subscribe) as liveness probe: reconnect
   after herdr restart → repaint all (herdr drops metadata on restart)
 

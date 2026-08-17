@@ -42,6 +42,10 @@ const (
 	// would strand a near-static row past its TTL (herdr drops the metadata,
 	// the pane goes dark with no content change coming to fix it).
 	failureRetryCooldown = 5 * time.Minute
+	// deadSweepsBeforeRetire is how many consecutive sweeps must find every
+	// bound socket unreachable before the painter exits — 3 sweeps ≈ 3
+	// minutes, long enough to ride out a herdr restart.
+	deadSweepsBeforeRetire = 3
 )
 
 // sessState is the in-memory dedup state for one session. Its own mutex
@@ -92,6 +96,13 @@ type Painter struct {
 	sweepMu      sync.Mutex
 	sweeping     bool
 	sweepPending bool
+
+	// deadSweeps counts consecutive sweeps in which bindings existed and not
+	// one of their sockets answered. quit fires when that count hits the
+	// threshold — see retire().
+	deadSweeps int
+	quit       chan struct{}
+	quitOnce   sync.Once
 }
 
 func New(cfgPath string, logger *log.Logger) *Painter {
@@ -100,6 +111,7 @@ func New(cfgPath string, logger *log.Logger) *Painter {
 		CfgPath:  cfgPath,
 		sessions: map[string]*sessState{},
 		timers:   map[string]*time.Timer{},
+		quit:     make(chan struct{}),
 	}
 	p.reloadConfig() // eager: one-shot callers (paint) never call Run
 	return p
@@ -140,6 +152,8 @@ func (p *Painter) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			return nil
+		case <-p.quit:
 			return nil
 		case ev, ok := <-watcher.Events:
 			if !ok {
@@ -370,6 +384,7 @@ func (p *Painter) sweepOnce() {
 		sockets = append(sockets, sock)
 	}
 	live := p.refreshLivePanes(sockets)
+	p.retireIfHerdrIsGone(len(sockets), len(live))
 
 	// Pass 2: veto bindings whose pane its OWN server says is gone, then
 	// keep one winner per (socket, pane). A pane claimed by several session
@@ -617,6 +632,35 @@ func (p *Painter) herdrLink(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// retireIfHerdrIsGone exits the painter once every socket its bindings name
+// has stopped answering. The painter outlives the session whose [[startup]]
+// hook launched it — deliberately, since it serves every session on the host
+// — but "every herdr on this host is gone" leaves a resident with nothing to
+// paint, holding the flock, invisible to `herdr session list`. Coming back is
+// automatic: any herdr start runs the startup hook again.
+//
+// Threshold, not first miss: a wedged or restarting server must not retire a
+// painter the rest of the fleet still needs, and zero BINDINGS (fresh host,
+// hooks not fired yet) is not zero herdrs.
+func (p *Painter) retireIfHerdrIsGone(sockets, reachable int) {
+	p.mu.Lock()
+	if sockets == 0 || reachable > 0 {
+		p.deadSweeps = 0
+		p.mu.Unlock()
+		return
+	}
+	p.deadSweeps++
+	n := p.deadSweeps
+	p.mu.Unlock()
+	if n < deadSweepsBeforeRetire {
+		p.Log.Printf("no herdr answered %d of %d socket(s) — retiring after %d more quiet sweep(s)",
+			sockets, sockets, deadSweepsBeforeRetire-n)
+		return
+	}
+	p.Log.Printf("no herdr left on this host after %d sweeps — exiting; a herdr start re-runs the [[startup]] hook", n)
+	p.quitOnce.Do(func() { close(p.quit) })
 }
 
 // linkSocket picks the endpoint for the liveness probe, re-resolved on every

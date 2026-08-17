@@ -478,3 +478,44 @@ func TestClaimantElectionScopedToSocket(t *testing.T) {
 		t.Fatal("second instance's claimant must paint too — election must key on (socket, pane)")
 	}
 }
+
+// The painter outlives the session that launched it by design, but once every
+// herdr on the host is gone it is a resident with nothing to paint, holding
+// the flock and invisible to `herdr session list`. It must retire itself —
+// and not on the first miss, or a herdr restart would kill the fleet's
+// painter.
+func TestPainterRetiresWhenEveryHerdrIsGone(t *testing.T) {
+	p, sock, _ := newTestPainter(t)
+	writeSessCache(t, "bounddead0000000", "p1", sock, 0)
+	p.Sweep() // herdr up: no retirement pressure
+
+	os.Remove(sock) // every bound socket now unreachable
+	for i := 0; i < deadSweepsBeforeRetire-1; i++ {
+		p.Sweep()
+		select {
+		case <-p.quit:
+			t.Fatalf("retired after %d quiet sweep(s) — a herdr restart must not kill the painter", i+1)
+		default:
+		}
+	}
+	p.Sweep()
+	select {
+	case <-p.quit:
+	default:
+		t.Fatal("every bound socket unreachable for the full threshold must retire the painter")
+	}
+}
+
+// Zero bindings is not zero herdrs: a fresh host whose hooks have not fired
+// yet would otherwise retire its painter seconds after the startup hook.
+func TestNoBindingsNeverRetires(t *testing.T) {
+	p, _, _ := newTestPainter(t)
+	for i := 0; i < deadSweepsBeforeRetire+2; i++ {
+		p.Sweep()
+	}
+	select {
+	case <-p.quit:
+		t.Fatal("an empty cache must never retire the painter")
+	default:
+	}
+}
