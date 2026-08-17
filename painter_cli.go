@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/caoer/ccc-herdr/internal/facts"
 	"github.com/caoer/ccc-herdr/internal/herdr"
@@ -27,9 +28,11 @@ func runPainter(args []string) int {
 	case "run":
 		return runPainterLoop()
 	case "start":
-		return startPainter()
+		return startPainter(false)
+	case "restart":
+		return startPainter(true)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: ccc-herdr painter run|start")
+		fmt.Fprintln(os.Stderr, "usage: ccc-herdr painter run|start|restart")
 		return 2
 	}
 }
@@ -41,7 +44,19 @@ func runPainter(args []string) int {
 // plugin command log entry) hanging for the painter's whole life.
 // Idempotent by flock probe — a second herdr server, a live handoff, or a
 // hand start finds the painter already up and no-ops.
-func startPainter() int {
+// takeover=true (`painter restart`) stops the incumbent first — what an
+// upgrade needs, since a running old painter holds the lock and a freshly
+// installed binary would no-op against it.
+func startPainter(takeover bool) int {
+	if takeover {
+		if stopped, pid := painter.StopIncumbent(5 * time.Second); pid != 0 {
+			if !stopped {
+				fmt.Fprintf(os.Stderr, "ccc-herdr: painter %d did not release the lock — not starting a second one\n", pid)
+				return 1
+			}
+			fmt.Printf("ccc-herdr: stopped painter %d\n", pid)
+		}
+	}
 	release, free := painter.AcquireSingleton()
 	if !free {
 		fmt.Println("ccc-herdr: painter already running")

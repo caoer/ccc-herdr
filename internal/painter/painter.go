@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -699,8 +700,58 @@ func AcquireSingleton() (release func(), ok bool) {
 		f.Close()
 		return func() {}, false
 	}
+	// Stamp the pid INSIDE the lock: an upgrade has to reach the incumbent,
+	// and the flock alone names nobody. Best-effort — a lock file that fails
+	// to write still locks, takeover just falls back to "cannot find it".
+	if err := f.Truncate(0); err == nil {
+		_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	}
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 	}, true
+}
+
+// IncumbentPID reads the pid the live painter stamped in its lock file. 0 =
+// no lock file, an unparsable one, or a pid nobody answers to.
+func IncumbentPID() int {
+	dir := StateDir()
+	if dir == "" {
+		return 0
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "painter.lock"))
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 1 {
+		return 0
+	}
+	if syscall.Kill(pid, 0) != nil { // gone, or not ours to signal
+		return 0
+	}
+	return pid
+}
+
+// StopIncumbent asks the live painter to exit and waits for it to release the
+// lock. Upgrades need this: the flock makes a NEW binary a silent no-op while
+// the OLD process keeps painting, so "installed" and "running" drift apart
+// with nothing on screen to say so.
+func StopIncumbent(wait time.Duration) (stopped bool, pid int) {
+	pid = IncumbentPID()
+	if pid == 0 {
+		return false, 0
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		return false, pid
+	}
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if release, free := AcquireSingleton(); free {
+			release()
+			return true, pid
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return false, pid
 }

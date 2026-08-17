@@ -167,21 +167,10 @@ func TestSweepPicksNewestClaimantPerPane(t *testing.T) {
 		t.Fatalf("exactly the newest claimant must paint pane p1, got token ids %v (wire %d lines)", ids, len(sent))
 	}
 	for _, l := range sent {
-		if json.Valid([]byte(l)) && stringContains(l, `"pane_id":"p9"`) {
+		if json.Valid([]byte(l)) && strings.Contains(l, `"pane_id":"p9"`) {
 			t.Fatalf("dead pane p9 must not be painted: %s", l)
 		}
 	}
-}
-
-func stringContains(s, sub string) bool { return len(s) >= len(sub) && (s == sub || len(sub) == 0 || indexOf(s, sub) >= 0) }
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 func TestConcurrentSweepAndRepaint(t *testing.T) {
@@ -240,7 +229,7 @@ func TestPaintAUQStateMachine(t *testing.T) {
 	cache := facts.Cache{SessionID: "s", HerdrPaneID: "p1", HerdrSocketPath: sock, AUQPending: 0}
 
 	p.paintAUQ(st, cfg, cache, false)
-	if got := drain(lines); len(got) != 1 || !stringContains(got[0], "clear_state_labels") {
+	if got := drain(lines); len(got) != 1 || !strings.Contains(got[0], "clear_state_labels") {
 		t.Fatalf("takeover (lastPending=-1, pending=0) must send one clear, got %v", got)
 	}
 
@@ -251,7 +240,7 @@ func TestPaintAUQStateMachine(t *testing.T) {
 
 	cache.AUQPending = 2
 	p.paintAUQ(st, cfg, cache, false)
-	if got := drain(lines); len(got) != 1 || !stringContains(got[0], `"blocked":"AUQ"`) {
+	if got := drain(lines); len(got) != 1 || !strings.Contains(got[0], `"blocked":"AUQ"`) {
 		t.Fatalf("pending edge must paint the label, got %v", got)
 	}
 
@@ -392,7 +381,7 @@ func TestPaintAUQLeaseZeroRetriesFailedEdge(t *testing.T) {
 	if st.lastPending != 1 {
 		t.Fatal("retry after recovery must advance state")
 	}
-	if got := drain(lines); len(got) != 1 || !stringContains(got[0], `"blocked"`) {
+	if got := drain(lines); len(got) != 1 || !strings.Contains(got[0], `"blocked"`) {
 		t.Fatalf("retried edge must reach the wire, got %v", got)
 	}
 }

@@ -53,6 +53,7 @@ speaks to herdr. Architecture and cutover: `DESIGN.md`.
 ccc-herdr check [sid]     # config diagnostics + exact wire lines (exit 1 on diags)
 ccc-herdr paint [sid]     # force a repaint now
 ccc-herdr painter start   # detach the resident loop; no-op if one is up
+ccc-herdr painter restart # stop the incumbent (pid in the lock), then start
 ccc-herdr painter run     # the resident loop, foreground
 ```
 
@@ -64,6 +65,13 @@ hand-started. `painter start` detaches (setsid, log to
 singleton. herdr does not supervise it: a crashed painter stays down until the
 next herdr start or a hand `painter start`. `contrib/dev.ccc.herdr-painter.plist`
 adds macOS launchd KeepAlive supervision on top; the flock keeps both safe.
+
+Upgrading the plugin does NOT upgrade the running painter: the old process
+holds the flock, so a fresh binary's `painter start` no-ops and the host keeps
+painting with the old code, silently. Finish an upgrade with `painter restart`
+— it reads the pid the incumbent stamped in `painter.lock`, SIGTERMs it, waits
+for the lock, then starts the new one. (On the mac, launchd KeepAlive respawns
+whatever the plist points at — restart the job instead.)
 
 Config: `$UCC_HOME/config/ccc-herdr.star`, else `ccc-herdr.toml`, hot-reloaded
 on save. Missing file = built-in defaults (the classic id/session/role/name
