@@ -812,8 +812,10 @@ const (
 // for exactly the incumbents that most need replacing — those from builds
 // before stamping existed. So an unstamped lock falls back to naming the
 // holder from the process table, and refuses when it cannot: plugin roots are
-// sha-scoped (`plugins/github/<id>-<hash>`), so after an upgrade the new
-// binary does not even share a path with the painter it must stop.
+// keyed by SOURCE not commit (`plugins/github/<id>-<hash>` survives an
+// upgrade, measured on ws-nyc-2), so after an upgrade the new
+// binary cannot rely on a path match either: several installs share one
+// source-keyed root, so a path says "a ccc-herdr", not "the incumbent".
 func StopIncumbent(wait time.Duration) (Takeover, int) {
 	if release, free := AcquireSingleton(); free {
 		release()
@@ -901,8 +903,8 @@ func lsofLockHolder() int {
 }
 
 // PainterProcesses lists running `ccc-herdr painter run` processes by pid.
-// Matched on the BASENAME: an upgraded plugin lives at a new sha-scoped root,
-// so the incumbent's path is not ours.
+// Matched on the BASENAME: a dev checkout, a linked plugin and an installed
+// one all run the same tool from different paths.
 func PainterProcesses() []int {
 	out, err := exec.Command("ps", "-A", "-o", "pid=,args=").Output()
 	if err != nil {

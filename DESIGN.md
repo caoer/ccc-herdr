@@ -31,8 +31,11 @@ next herdr start, or launchd KeepAlive on the mac (`contrib/*.plist`).
 `$UCC_HOME/cache/ccc-herdr/painter.lock` is the singleton flock AND the
 upgrade channel: the live painter stamps its pid inside it, and that pid is
 how a newly installed binary reaches the incumbent it must replace
-(`painter restart`). Plugin roots are sha-scoped, so after an upgrade the new
-binary shares no path with the running painter — the stamp is the only link.
+(`painter restart`). Measured: a github plugin root (`plugins/github/<id>-<hash>`)
+is keyed by SOURCE, not commit — ws-nyc-2 kept `ccc-herdr-742fd1fd13e1` across an
+upgrade — so the new binary does share the incumbent's path. The stamp still
+matters: it names the process without guessing from a path several installs
+could share.
 An UNSTAMPED lock (a build older than stamping, or a failed write) is named
 from lsof, then `/proc/<pid>/fd`, then a single unambiguous `ccc-herdr painter
 run` in the process table; failing all three it refuses loudly rather than
