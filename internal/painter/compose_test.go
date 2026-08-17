@@ -7,14 +7,14 @@ import (
 
 func identityVars() map[string]string {
 	return map[string]string{
-		"SESSION_ID_SHORT":  "ad3009b4",
-		"CCC_SESSION":       "02-00-adhoc",
-		"ROLE":              "worker",
-		"NAME":              "reader",
-		"TITLE":             "reader",
-		"PROFILE":           "models-turnip",
+		"SESSION_ID_SHORT":   "ad3009b4",
+		"CCC_SESSION":        "02-00-adhoc",
+		"ROLE":               "worker",
+		"NAME":               "reader",
+		"TITLE":              "reader",
+		"PROFILE":            "models-turnip",
 		"PROFILE_IF_UNNAMED": "",
-		"HERDR_TITLE":       "",
+		"HERDR_TITLE":        "",
 	}
 }
 

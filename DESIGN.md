@@ -28,6 +28,16 @@ asynchronously, reading their stdout/stderr to EOF — hence detach with a log
 FILE, never an inherited pipe. herdr does not supervise: crash recovery is the
 next herdr start, or launchd KeepAlive on the mac (`contrib/*.plist`).
 
+`$UCC_HOME/cache/ccc-herdr/painter.lock` is the singleton flock AND the
+upgrade channel: the live painter stamps its pid inside it, and that pid is
+how a newly installed binary reaches the incumbent it must replace
+(`painter restart`). Plugin roots are sha-scoped, so after an upgrade the new
+binary shares no path with the running painter — the stamp is the only link.
+An UNSTAMPED lock (a build older than stamping, or a failed write) is named
+from lsof, then `/proc/<pid>/fd`, then a single unambiguous `ccc-herdr painter
+run` in the process table; failing all three it refuses loudly rather than
+no-op into "already running", which is the silent upgrade failure.
+
 One painter per HOST, not per herdr session: the statusd cache is host-global
 and every session has its own herdr server. So each binding is sent to — and
 judged for liveness by — the socket in its OWN cache entry (`herdr_socket_path`),

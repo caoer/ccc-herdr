@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -756,14 +757,26 @@ func AcquireSingleton() (release func(), ok bool) {
 	}, true
 }
 
-// IncumbentPID reads the pid the live painter stamped in its lock file. 0 =
-// no lock file, an unparsable one, or a pid nobody answers to.
-func IncumbentPID() int {
+// LockPath is the painter's flock file. Its CONTENT is load-bearing: the pid
+// stamped inside is how a newly installed binary reaches the incumbent it has
+// to replace.
+func LockPath() string {
 	dir := StateDir()
 	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "painter.lock")
+}
+
+// IncumbentPID reads the pid the live painter stamped in its lock file. 0 =
+// no lock file, an unparsable one (a build older than pid-stamping leaves it
+// EMPTY), or a pid nobody answers to.
+func IncumbentPID() int {
+	path := LockPath()
+	if path == "" {
 		return 0
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "painter.lock"))
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
@@ -777,25 +790,138 @@ func IncumbentPID() int {
 	return pid
 }
 
+// Takeover reports what StopIncumbent found. Unidentified and Stuck are
+// FAILURES the caller must surface: an upgrade that cannot replace the
+// running painter leaves the host painting with the old code, and silence
+// there is the bug takeover exists to prevent.
+type Takeover int
+
+const (
+	NoIncumbent  Takeover = iota // the lock was free
+	Stopped                      // incumbent exited, lock free again
+	Unidentified                 // lock held, holder cannot be named
+	Stuck                        // holder signalled, lock still held
+)
+
 // StopIncumbent asks the live painter to exit and waits for it to release the
 // lock. Upgrades need this: the flock makes a NEW binary a silent no-op while
 // the OLD process keeps painting, so "installed" and "running" drift apart
 // with nothing on screen to say so.
-func StopIncumbent(wait time.Duration) (stopped bool, pid int) {
-	pid = IncumbentPID()
+//
+// The pid stamp is the first answer and the only exact one, but it is absent
+// for exactly the incumbents that most need replacing — those from builds
+// before stamping existed. So an unstamped lock falls back to naming the
+// holder from the process table, and refuses when it cannot: plugin roots are
+// sha-scoped (`plugins/github/<id>-<hash>`), so after an upgrade the new
+// binary does not even share a path with the painter it must stop.
+func StopIncumbent(wait time.Duration) (Takeover, int) {
+	if release, free := AcquireSingleton(); free {
+		release()
+		return NoIncumbent, 0
+	}
+	pid := IncumbentPID()
 	if pid == 0 {
-		return false, 0
+		pid = findIncumbent()
+	}
+	if pid == 0 {
+		return Unidentified, 0
 	}
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		return false, pid
+		return Unidentified, pid
 	}
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		if release, free := AcquireSingleton(); free {
 			release()
-			return true, pid
+			return Stopped, pid
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return false, pid
+	return Stuck, pid
+}
+
+// findIncumbent names the holder of an unstamped lock. lsof answers exactly
+// (it reads the open file); the process table is the fallback and stays
+// conservative — several candidates means we do not know, and SIGTERMing the
+// wrong painter (another UCC_HOME on the same host) is worse than refusing.
+func findIncumbent() int {
+	if pid := lsofLockHolder(); pid != 0 {
+		return pid
+	}
+	if pid := procLockHolder(); pid != 0 {
+		return pid
+	}
+	if cands := PainterProcesses(); len(cands) == 1 {
+		return cands[0]
+	}
+	return 0
+}
+
+// procLockHolder answers exactly on Linux without lsof — the shape of a
+// minimal NixOS host, and the only tier left when a second painter (another
+// UCC_HOME) makes the process-table heuristic ambiguous.
+func procLockHolder() int { return procLockHolderFor(PainterProcesses()) }
+
+func procLockHolderFor(pids []int) int {
+	path := LockPath()
+	if path == "" {
+		return 0
+	}
+	for _, pid := range pids {
+		fdDir := filepath.Join("/proc", strconv.Itoa(pid), "fd")
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue // not Linux, or not ours to read
+		}
+		for _, fd := range fds {
+			if target, err := os.Readlink(filepath.Join(fdDir, fd.Name())); err == nil && target == path {
+				return pid
+			}
+		}
+	}
+	return 0
+}
+
+func lsofLockHolder() int {
+	path := LockPath()
+	if path == "" {
+		return 0
+	}
+	out, err := exec.Command("lsof", "-t", path).Output() // absent on minimal hosts
+	if err != nil {
+		return 0
+	}
+	self := os.Getpid()
+	for _, line := range strings.Fields(string(out)) {
+		if pid, err := strconv.Atoi(line); err == nil && pid != self {
+			return pid
+		}
+	}
+	return 0
+}
+
+// PainterProcesses lists running `ccc-herdr painter run` processes by pid.
+// Matched on the BASENAME: an upgraded plugin lives at a new sha-scoped root,
+// so the incumbent's path is not ours.
+func PainterProcesses() []int {
+	out, err := exec.Command("ps", "-A", "-o", "pid=,args=").Output()
+	if err != nil {
+		return nil
+	}
+	self := os.Getpid()
+	var pids []int
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid == self {
+			continue
+		}
+		if filepath.Base(fields[1]) == "ccc-herdr" && fields[2] == "painter" && fields[3] == "run" {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }

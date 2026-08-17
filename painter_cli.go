@@ -49,12 +49,21 @@ func runPainter(args []string) int {
 // installed binary would no-op against it.
 func startPainter(takeover bool) int {
 	if takeover {
-		if stopped, pid := painter.StopIncumbent(5 * time.Second); pid != 0 {
-			if !stopped {
-				fmt.Fprintf(os.Stderr, "ccc-herdr: painter %d did not release the lock — not starting a second one\n", pid)
-				return 1
-			}
+		switch result, pid := painter.StopIncumbent(5 * time.Second); result {
+		case painter.Stopped:
 			fmt.Printf("ccc-herdr: stopped painter %d\n", pid)
+		case painter.Stuck:
+			fmt.Fprintf(os.Stderr, "ccc-herdr: painter %d did not release the lock — not starting a second one\n", pid)
+			return 1
+		case painter.Unidentified:
+			// Never fall through to "already running": that is the silent
+			// upgrade failure — plugin at the new sha, host painting with the
+			// old code, nothing on screen saying so.
+			fmt.Fprintf(os.Stderr, "ccc-herdr: a painter holds %s but cannot be named — kill it, then `ccc-herdr painter start`\n", painter.LockPath())
+			if cands := painter.PainterProcesses(); len(cands) > 0 {
+				fmt.Fprintf(os.Stderr, "  candidates: %v\n", cands)
+			}
+			return 1
 		}
 	}
 	release, free := painter.AcquireSingleton()

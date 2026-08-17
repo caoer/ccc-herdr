@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -517,5 +518,26 @@ func TestNoBindingsNeverRetires(t *testing.T) {
 	case <-p.quit:
 		t.Fatal("an empty cache must never retire the painter")
 	default:
+	}
+}
+
+// An upgrade must be able to name the painter it replaces even when the lock
+// carries no pid — the incumbents that most need replacing are exactly the
+// ones from builds before pid-stamping. lsof is absent on minimal hosts, so
+// /proc is the tier that has to work there.
+func TestProcLockHolderNamesTheHolder(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc/<pid>/fd is Linux-only; lsof covers macOS")
+	}
+	t.Setenv("CCC_CACHE_DIR", t.TempDir())
+	release, free := AcquireSingleton()
+	if !free {
+		t.Fatal("fresh cache dir must yield a free lock")
+	}
+	defer release()
+	// PainterProcesses only lists `ccc-herdr painter run`; the test binary is
+	// not one, so seed the scan with this process to exercise the fd walk.
+	if got := procLockHolderFor([]int{os.Getpid()}); got != os.Getpid() {
+		t.Fatalf("holder of %s must be found via /proc, got %d", LockPath(), got)
 	}
 }
