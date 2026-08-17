@@ -60,6 +60,15 @@ Writers keep statusd's sources — `ccc:identity` (tokens, display_agent,
 params) and `ccc:auq` (state_labels{blocked} lease) — so ownership transfers
 without a herdr-side change.
 
+## Testing painter behaviour on a live host
+
+Point `UCC_HOME` (or `CCC_CACHE_DIR`) at a throwaway directory: the painter
+resolves everything — lock, log, bindings, sockets — beneath it, so an
+isolated painter cannot touch the fleet's, and a single fabricated binding
+naming a dead socket reproduces "no herdr on this host" without stopping any
+real session. Verified this way on cos-stex-ucc while live sessions kept
+painting.
+
 ## Config
 
 `$UCC_HOME/config/ccc-herdr.star` when it exists, else

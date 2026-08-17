@@ -656,8 +656,8 @@ func (p *Painter) retireIfHerdrIsGone(sockets, reachable int) {
 	n := p.deadSweeps
 	p.mu.Unlock()
 	if n < deadSweepsBeforeRetire {
-		p.Log.Printf("no herdr answered %d of %d socket(s) — retiring after %d more quiet sweep(s)",
-			sockets, sockets, deadSweepsBeforeRetire-n)
+		p.Log.Printf("no herdr answered on any of %d socket(s) — retiring after %d more quiet sweep(s)",
+			sockets, deadSweepsBeforeRetire-n)
 		return
 	}
 	p.Log.Printf("no herdr left on this host after %d sweeps — exiting; a herdr start re-runs the [[startup]] hook", n)
