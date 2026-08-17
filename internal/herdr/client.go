@@ -72,6 +72,11 @@ func NewClient() (*Client, error) {
 	return &Client{socketPath: path}, nil
 }
 
+// NewClientFor targets one named socket. The painter is host-wide but herdr
+// is not: every session has its own server, so liveness must be asked of the
+// socket a pane actually belongs to, never of $HERDR_SOCKET_PATH alone.
+func NewClientFor(socketPath string) *Client { return &Client{socketPath: socketPath} }
+
 type request struct {
 	ID     string `json:"id"`
 	Method string `json:"method"`

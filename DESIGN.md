@@ -28,6 +28,13 @@ asynchronously, reading their stdout/stderr to EOF — hence detach with a log
 FILE, never an inherited pipe. herdr does not supervise: crash recovery is the
 next herdr start, or launchd KeepAlive on the mac (`contrib/*.plist`).
 
+One painter per HOST, not per herdr session: the statusd cache is host-global
+and every session has its own herdr server. So each binding is sent to — and
+judged for liveness by — the socket in its OWN cache entry (`herdr_socket_path`),
+one snapshot per socket per sweep. `$HERDR_SOCKET_PATH` names only the
+reconnect probe's endpoint, re-resolved to a reachable socket when the session
+that launched the painter goes away.
+
 - fsnotify on the cache dir → 300ms debounce per session → repaint
 - fsnotify on the config file → reload → repaint all
 - 60s sweep → lease renewal (identity TTL half-life, AUQ lease), decay

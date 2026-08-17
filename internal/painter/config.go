@@ -85,6 +85,12 @@ func ConfigNote(path string) string {
 		return "none resolvable (UCC_HOME unset?) — built-in defaults"
 	}
 	if _, err := os.Stat(path); err != nil {
+		if strings.HasSuffix(path, ".toml") {
+			// ConfigPath only falls back to the .toml sibling when no .star
+			// exists, so a missing .toml means BOTH are absent. Naming just
+			// the fallback reads as "this host wanted a toml".
+			return fmt.Sprintf("no ccc-herdr.star or ccc-herdr.toml in %s — built-in defaults", filepath.Dir(path))
+		}
 		return path + " (missing — built-in defaults)"
 	}
 	return path

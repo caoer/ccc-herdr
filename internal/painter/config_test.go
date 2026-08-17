@@ -39,6 +39,12 @@ func TestConfigNoteMarksMissingFile(t *testing.T) {
 	if note := ConfigNote(""); !strings.Contains(note, "defaults") {
 		t.Fatalf("unresolvable path must say defaults, got %q", note)
 	}
+	// The .toml is only the FALLBACK: missing it means no .star either, and
+	// the line must not read as if the host wanted a toml.
+	note := ConfigNote(filepath.Join(t.TempDir(), "ccc-herdr.toml"))
+	if !strings.Contains(note, "ccc-herdr.star") || !strings.Contains(note, "ccc-herdr.toml") {
+		t.Fatalf("missing fallback must name both candidates, got %q", note)
+	}
 }
 
 func TestLoadConfigPerKeyOverlay(t *testing.T) {

@@ -77,14 +77,13 @@ type Painter struct {
 	sessions map[string]*sessState
 	timers   map[string]*time.Timer
 
-	// Pane-liveness set from the last snapshot fetch (sweep-refreshed): a
-	// cache binding whose pane is gone must not be painted — 48h of session
-	// churn otherwise leaves hundreds of dead bindings fighting live panes.
-	// Scoped to livePanesSock: the veto only judges sessions bound to the
-	// SAME herdr socket the snapshot came from.
-	livePanes     map[string]bool
-	livePanesSock string
-	livePanesAt   time.Time
+	// Pane-liveness sets from the last snapshot fetch (sweep-refreshed), one
+	// per herdr socket: a cache binding whose pane is gone must not be
+	// painted — 48h of session churn otherwise leaves hundreds of dead
+	// bindings fighting live panes. Keyed by socket because pane ids are
+	// per-server (two servers both have a w1:p1), and because a host runs
+	// one painter across every herdr session.
+	livePanes map[string]livePaneSet
 
 	// sweepMu makes acquire/release/record one critical section — two
 	// independent atomics left a window where a coalesced request landed
@@ -252,42 +251,54 @@ func (p *Painter) state(sid string) *sessState {
 	return s
 }
 
-// refreshLivePanes fetches herdr's pane set once (one snapshot per sweep).
-// ok=false means herdr is unreachable — sends would fail anyway, and the
-// event path falls back to its last known set. The returned sock names the
-// endpoint the set is authoritative FOR: sessions bound to a different
-// herdr socket are never judged by it.
-func (p *Painter) refreshLivePanes() (live map[string]bool, sock string, ok bool) {
-	client, err := herdr.NewClient()
-	if err != nil {
-		return nil, "", false
+// livePaneSet is one herdr server's pane set, with the time it was read.
+type livePaneSet struct {
+	panes map[string]bool
+	at    time.Time
+}
+
+// refreshLivePanes snapshots EVERY socket the cache binds to — one snapshot
+// per socket per sweep. A host runs one painter over every herdr session, so
+// asking only $HERDR_SOCKET_PATH left every other server's stale bindings
+// unvetoed: they were sent and rejected `pane_not_found` until the failure
+// brake cooled them. A socket that answers nothing is omitted, not empty:
+// unreachable means UNKNOWN (never dead), and sends fail on their own.
+func (p *Painter) refreshLivePanes(sockets []string) map[string]map[string]bool {
+	live := make(map[string]map[string]bool, len(sockets))
+	for _, sock := range sockets {
+		snap, err := herdr.NewClientFor(sock).Snapshot()
+		if err != nil || snap == nil {
+			continue
+		}
+		panes := make(map[string]bool, len(snap.Panes))
+		for _, pane := range snap.Panes {
+			panes[pane.PaneID] = true
+		}
+		live[sock] = panes
 	}
-	snap, err := client.Snapshot()
-	if err != nil || snap == nil {
-		return nil, "", false
-	}
-	live = make(map[string]bool, len(snap.Panes))
-	for _, pane := range snap.Panes {
-		live[pane.PaneID] = true
-	}
+	now := time.Now()
 	p.mu.Lock()
-	p.livePanes = live
-	p.livePanesSock = client.SocketPath()
-	p.livePanesAt = time.Now()
+	if p.livePanes == nil {
+		p.livePanes = map[string]livePaneSet{}
+	}
+	for sock, panes := range live {
+		p.livePanes[sock] = livePaneSet{panes: panes, at: now}
+	}
 	p.mu.Unlock()
-	return live, client.SocketPath(), true
+	return live
 }
 
 // paneKnownDead consults the last liveness set for the event path; unknown
-// or stale data — or a session bound to a different herdr socket — never
-// blocks a paint (the dedup brake handles dead sends).
+// or stale data — or a socket never snapshotted — never blocks a paint (the
+// dedup brake handles dead sends).
 func (p *Painter) paneKnownDead(paneID, sockPath string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.livePanes == nil || p.livePanesSock != sockPath || time.Since(p.livePanesAt) > livePanesTTL {
+	set, ok := p.livePanes[sockPath]
+	if !ok || time.Since(set.at) > livePanesTTL {
 		return false
 	}
-	return !p.livePanes[paneID]
+	return !set.panes[paneID]
 }
 
 // Sweep repaints every live session: lease renewal, decay, takeover.
@@ -324,23 +335,17 @@ func (p *Painter) sweepOnce() {
 		return
 	}
 	sessionMap := facts.LoadSessionMap() // once per sweep, not per session
-	livePanes, liveSock, liveOK := p.refreshLivePanes()
 
-	// Pass 1: read fresh bound caches; one winner per (socket, pane). A pane
-	// claimed by several session caches (churned panes re-used) is painted
-	// only by the claimant with the most recent hook activity — same-source
-	// seq ordering would otherwise let a dead session's row overwrite the
-	// live one's every sweep. Keyed with the socket because pane ids are
-	// per-herdr-instance: two instances both have a w1:p1.
+	// Pass 1: read fresh bound caches and collect the sockets they bind to.
 	type claimant struct {
 		sid   string
 		cache facts.Cache
 	}
 	type paneKey struct{ sock, pane string }
-	best := map[paneKey]claimant{}
+	var bound []claimant
+	sockSet := map[string]bool{}
 	seen := map[string]bool{}
 	now := time.Now()
-	vetoed := 0
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, ".json") {
@@ -356,16 +361,32 @@ func (p *Painter) sweepOnce() {
 		if err != nil || cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
 			continue
 		}
-		// The liveness veto only judges sessions bound to the socket the
-		// snapshot came from — a second herdr instance's panes are unknown
-		// here, never dead.
-		if liveOK && cache.HerdrSocketPath == liveSock && !livePanes[cache.HerdrPaneID] {
+		bound = append(bound, claimant{sid, cache})
+		sockSet[cache.HerdrSocketPath] = true
+	}
+	sockets := make([]string, 0, len(sockSet))
+	for sock := range sockSet {
+		sockets = append(sockets, sock)
+	}
+	live := p.refreshLivePanes(sockets)
+
+	// Pass 2: veto bindings whose pane its OWN server says is gone, then
+	// keep one winner per (socket, pane). A pane claimed by several session
+	// caches (churned panes re-used) is painted only by the claimant with
+	// the most recent hook activity — same-source seq ordering would
+	// otherwise let a dead session's row overwrite the live one's every
+	// sweep. Keyed with the socket because pane ids are per-herdr-instance:
+	// two instances both have a w1:p1.
+	best := map[paneKey]claimant{}
+	vetoed := 0
+	for _, c := range bound {
+		if panes, known := live[c.cache.HerdrSocketPath]; known && !panes[c.cache.HerdrPaneID] {
 			vetoed++
 			continue // pane is gone — labels decay via TTL
 		}
-		k := paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}
-		if cur, taken := best[k]; !taken || cache.LastHookEvent.After(cur.cache.LastHookEvent) {
-			best[k] = claimant{sid, cache}
+		k := paneKey{c.cache.HerdrSocketPath, c.cache.HerdrPaneID}
+		if cur, taken := best[k]; !taken || c.cache.LastHookEvent.After(cur.cache.LastHookEvent) {
+			best[k] = c
 		}
 	}
 	if vetoed > 0 {
@@ -557,16 +578,12 @@ func configReferencesVar(cfg Config, name string) bool {
 // full repaint. Event content is irrelevant — the connection lifecycle is
 // the signal; dedup's socket-inode check backstops anything missed.
 func (p *Painter) herdrLink(ctx context.Context) {
-	socketPath := os.Getenv("HERDR_SOCKET_PATH")
-	if socketPath == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return
-		}
-		socketPath = filepath.Join(home, ".config", "herdr", "herdr.sock")
-	}
 	first := true
 	for ctx.Err() == nil {
+		socketPath := p.linkSocket()
+		if socketPath == "" {
+			return
+		}
 		conn, err := net.Dial("unix", socketPath)
 		if err != nil {
 			first = false
@@ -599,6 +616,40 @@ func (p *Painter) herdrLink(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// linkSocket picks the endpoint for the liveness probe, re-resolved on every
+// redial. The painter outlives the herdr session whose [[startup]] hook
+// launched it, so $HERDR_SOCKET_PATH can name a server that is never coming
+// back; pinning to it would cost the reconnect edge (repaint-all after a
+// herdr restart) for every OTHER session, forever. Falls back to the most
+// recently reachable socket the sweep found — no extra I/O, the sweep
+// already talks to all of them.
+func (p *Painter) linkSocket() string {
+	if env := os.Getenv("HERDR_SOCKET_PATH"); env != "" {
+		if _, err := os.Stat(env); err == nil {
+			return env
+		}
+	}
+	p.mu.Lock()
+	best, bestAt := "", time.Time{}
+	for sock, set := range p.livePanes {
+		if set.at.After(bestAt) {
+			best, bestAt = sock, set.at
+		}
+	}
+	p.mu.Unlock()
+	if best != "" {
+		return best
+	}
+	if env := os.Getenv("HERDR_SOCKET_PATH"); env != "" {
+		return env // gone right now, but it is the only name we have
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "herdr", "herdr.sock")
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

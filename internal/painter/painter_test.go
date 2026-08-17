@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -435,19 +436,40 @@ func TestSweepBoundedAgainstWedgedHerdr(t *testing.T) {
 	}
 }
 
-func TestLivenessVetoScopedToSocket(t *testing.T) {
+// One painter serves every herdr session on the host, so each binding must be
+// judged by ITS OWN server: asking only $HERDR_SOCKET_PATH sent every other
+// server's stale bindings and collected `pane_not_found`.
+func TestLivenessVetoAsksEachPanesOwnSocket(t *testing.T) {
 	p, sock, lines := newTestPainter(t)
-	// Session bound to a DIFFERENT herdr socket than the probed one, on a
-	// pane id the probed snapshot does not list: must NOT be vetoed.
 	otherSock, otherLines := stubHerdr(t)
-	writeSessCache(t, "otherherdr0000000", "p9", otherSock, 0)
-	writeSessCache(t, "sameherdr00000000", "p9", sock, 0) // same pane id, probed socket → vetoed
+	writeSessCache(t, "otherlive00000000", "p1", otherSock, 0) // live there → paints
+	writeSessCache(t, "otherdead00000000", "p9", otherSock, 0) // gone there → vetoed
+	writeSessCache(t, "sameherdr00000000", "p9", sock, 0)      // gone here  → vetoed
 
 	p.Sweep()
-	drain(lines)
-	if got := drain(otherLines); len(got) == 0 {
-		t.Fatal("a session on another herdr socket must not be vetoed by this socket's snapshot")
+	if reports := metadataReports(drain(lines)); len(reports) != 0 {
+		t.Fatalf("pane gone on the probed socket must be vetoed, sent %d report(s)", len(reports))
 	}
+	reports := metadataReports(drain(otherLines))
+	if len(reports) == 0 {
+		t.Fatal("a live pane on another herdr socket must paint")
+	}
+	for _, line := range reports {
+		if strings.Contains(line, `"p9"`) {
+			t.Fatalf("pane gone on its own socket must be vetoed, got %s", line)
+		}
+	}
+}
+
+// metadataReports keeps the paint traffic and drops the snapshot probes.
+func metadataReports(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		if strings.Contains(l, "pane.report_metadata") {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func TestClaimantElectionScopedToSocket(t *testing.T) {
