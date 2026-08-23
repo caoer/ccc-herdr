@@ -99,6 +99,64 @@ func TestRoleFromAgentFileFrontmatter(t *testing.T) {
 	}
 }
 
+// The session the pane shows is the CARD's `session:` — the map's stored dir
+// is only the birth dir (the day's adhoc tree); a seat that re-seated itself by
+// putting session:/seat: on its card must show the session it joined.
+func TestVarsSessionFollowsCard(t *testing.T) {
+	card := filepath.Join(t.TempDir(), "agents", "1d320e04", "1d320e04.md")
+	os.MkdirAll(filepath.Dir(card), 0o755)
+	os.WriteFile(card, []byte("---\ntype: agent\nrole: leader\nseat: \"[[year=2026/month=08/22-18-hook-support-design/rosters/leader-wave-residue]]\"\nsession: \"22-18-hook-support-design\"\n---\n"), 0o644)
+	entry := MapEntry{SessionDir: "/x/year=2026/month=08/23-00-adhoc", AgentFile: card}
+	vars := Vars("1d320e04-3ad8", Cache{}, entry)
+	if vars["CCC_SESSION"] != "22-18-hook-support-design" {
+		t.Fatalf("card session must win over the stored birth dir: %q", vars["CCC_SESSION"])
+	}
+	if vars["ROLE"] != "leader" {
+		t.Fatalf("role from the same card: %q", vars["ROLE"])
+	}
+
+	// seat: alone (no session: key) — the session is the path before /rosters/.
+	os.WriteFile(card, []byte("---\nseat: \"[[year=2026/month=08/22-18-hook-support-design/rosters/worker-x]]\"\n---\n"), 0o644)
+	if got := Vars("1d320e04-3ad8", Cache{}, entry)["CCC_SESSION"]; got != "22-18-hook-support-design" {
+		t.Fatalf("seat-derived session: %q", got)
+	}
+
+	// Card names no session → the stored dir's basename, as before.
+	os.WriteFile(card, []byte("---\ntype: agent\n---\n"), 0o644)
+	if got := Vars("1d320e04-3ad8", Cache{}, entry)["CCC_SESSION"]; got != "23-00-adhoc" {
+		t.Fatalf("stored dir fallback: %q", got)
+	}
+}
+
+// The daemon owns session-map.json under its cache dir; the retired ccc-cli
+// file is read only while the daemon file does not exist.
+func TestSessionMapPrefersDaemonFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("UCC_HOME", home)
+	t.Setenv("CCC_CACHE_DIR", "")
+	t.Setenv("CCC_CLI_CACHE_DIR", "")
+	legacy := filepath.Join(home, "cache", "ccc-cli", "session-map.json")
+	daemon := filepath.Join(home, "cache", "ccc-status", "session-map.json")
+	os.MkdirAll(filepath.Dir(legacy), 0o755)
+	os.MkdirAll(filepath.Dir(daemon), 0o755)
+	os.WriteFile(legacy, []byte(`{"sid":{"sessionDir":"/legacy","agentFile":"/legacy/a.md"}}`), 0o644)
+	if got := LoadSessionMap()["sid"].SessionDir; got != "/legacy" {
+		t.Fatalf("legacy fallback while daemon file absent: %q", got)
+	}
+	os.WriteFile(daemon, []byte(`{"sid":{"sessionDir":"/daemon","agentFile":"/daemon/a.md"}}`), 0o644)
+	if got := LoadSessionMap()["sid"].SessionDir; got != "/daemon" {
+		t.Fatalf("daemon file must win once present: %q", got)
+	}
+}
+
+func TestUnquote(t *testing.T) {
+	for in, want := range map[string]string{`"22-18-x"`: "22-18-x", `'a'`: "a", `bare`: "bare", `"`: `"`} {
+		if got := Unquote(in); got != want {
+			t.Errorf("Unquote(%q) = %q want %q", in, got, want)
+		}
+	}
+}
+
 func TestParseFrontmatterUnclosedIsNotABlock(t *testing.T) {
 	fm := ParseFrontmatter("---\nrole: leader\nno closer\n")
 	if len(fm) != 0 {

@@ -1,5 +1,5 @@
 // Package facts reads the ccc fact surfaces the painter renders from: the
-// statusd session cache, the ccc-cli session map, and agent-file frontmatter.
+// statusd session cache, the daemon's session map, and agent-card frontmatter.
 // Read-only — ccc-herdr never writes a fact.
 package facts
 
@@ -67,16 +67,23 @@ func CacheDir() string {
 	return filepath.Join(base, "cache", "ccc-status")
 }
 
-// SessionMapPath mirrors ccc-cli's cachePath resolution.
-func SessionMapPath() string {
+// SessionMapPaths lists where session-map.json may live, in read order: the
+// daemon-owned file under its cache dir (ccc-statusd internal/sessionmap,
+// daemon-identity-absorb 2026-08-21), then the retired ccc-cli writer's file —
+// read only while the daemon file does not exist, so a host that never crossed
+// the deploy still resolves. Neither is ever written here.
+func SessionMapPaths() []string {
+	var paths []string
+	if dir := CacheDir(); dir != "" {
+		paths = append(paths, filepath.Join(dir, "session-map.json"))
+	}
 	if override := strings.TrimSpace(os.Getenv("CCC_CLI_CACHE_DIR")); override != "" {
-		return filepath.Join(filepath.Clean(override), "session-map.json")
+		return append(paths, filepath.Join(filepath.Clean(override), "session-map.json"))
 	}
-	base := uccHome()
-	if base == "" {
-		return ""
+	if base := uccHome(); base != "" {
+		paths = append(paths, filepath.Join(base, "cache", "ccc-cli", "session-map.json"))
 	}
-	return filepath.Join(base, "cache", "ccc-cli", "session-map.json")
+	return paths
 }
 
 // ReadCache parses one session cache file.
@@ -92,10 +99,26 @@ func ReadCache(path string) (Cache, error) {
 	return c, nil
 }
 
-// LoadSessionMap reads the whole session map; nil on any miss (lenient
-// reader — the TS side is the validator that rebuilds a corrupt file).
+// LoadSessionMap reads the whole session map — the first file of
+// SessionMapPaths that exists; nil on any miss (lenient reader — the daemon
+// rebuilds a corrupt file one entry at a time, never the painter).
 func LoadSessionMap() map[string]MapEntry {
-	path := SessionMapPath()
+	for _, path := range SessionMapPaths() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var m map[string]MapEntry
+		if json.Unmarshal(data, &m) != nil {
+			return nil
+		}
+		return m
+	}
+	return nil
+}
+
+// readCard parses the agent card's frontmatter; empty on any miss.
+func readCard(path string) map[string]string {
 	if path == "" {
 		return nil
 	}
@@ -103,18 +126,18 @@ func LoadSessionMap() map[string]MapEntry {
 	if err != nil {
 		return nil
 	}
-	var m map[string]MapEntry
-	if json.Unmarshal(data, &m) != nil {
-		return nil
-	}
-	return m
+	return ParseFrontmatter(string(data))
 }
 
 // Role resolves the session's role: agent-file frontmatter, then the sticky
 // last_known_role cache fallback (a transiently missing agent file must not
 // blank the label).
 func Role(agentFile string, c Cache) string {
-	if r := roleFromAgentFile(agentFile); r != "" {
+	return roleFrom(readCard(agentFile), c)
+}
+
+func roleFrom(fm map[string]string, c Cache) string {
+	if r := roleFromFrontmatter(fm); r != "" {
 		return r
 	}
 	return c.LastKnownRole
@@ -122,15 +145,7 @@ func Role(agentFile string, c Cache) string {
 
 var knownRoles = map[string]bool{"advisor": true, "leader": true, "worker": true}
 
-func roleFromAgentFile(path string) string {
-	if path == "" {
-		return ""
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	fm := ParseFrontmatter(string(data))
+func roleFromFrontmatter(fm map[string]string) string {
 	if r := strings.TrimSpace(fm["role"]); r != "" {
 		return r
 	}
@@ -143,6 +158,42 @@ func roleFromAgentFile(path string) string {
 		return t
 	}
 	return ""
+}
+
+// sessionFrom resolves the session slug the pane shows. The CARD is the seat
+// record (ccc-base § Boot): the map's stored dir is only the birth dir — the
+// day's adhoc tree — and a seat re-seats itself by putting `session:` / `seat:`
+// on its card. Precedence mirrors the daemon's sessionmap.Resolve:
+//
+//  1. `session:` — the slug itself.
+//  2. `seat:` — `[[<session-rel>/rosters/<name>]]`; the slug is the last path
+//     segment before /rosters/.
+//  3. the stored SessionDir's basename.
+//  4. "" — unjoined; the caller shows the ad-hoc default.
+func sessionFrom(fm map[string]string, entry MapEntry) string {
+	if slug := Unquote(fm["session"]); slug != "" {
+		return slug
+	}
+	if seat := Unquote(fm["seat"]); seat != "" {
+		seat = strings.TrimSuffix(strings.TrimPrefix(seat, "[["), "]]")
+		if i := strings.Index(seat, "/rosters/"); i > 0 {
+			return filepath.Base(seat[:i])
+		}
+	}
+	if entry.SessionDir != "" {
+		return filepath.Base(entry.SessionDir)
+	}
+	return ""
+}
+
+// Unquote strips one pair of matching surrounding quotes from a frontmatter
+// scalar (`session: "22-18-x"` is how the engine writes it).
+func Unquote(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		return v[1 : len(v)-1]
+	}
+	return v
 }
 
 // ParseFrontmatter matches ccc-cli parseFrontmatter: first `---` pair from
@@ -214,11 +265,12 @@ func profileFromTranscriptPath(path string) string {
 // SESSION facts. A fact that does not exist yet is the empty string, which
 // the composer maps onto herdr's token-clear convention.
 func Vars(sessionID string, c Cache, entry MapEntry) map[string]string {
+	card := readCard(entry.AgentFile) // one read serves role and session
 	vars := map[string]string{
 		"SESSION_ID":       sessionID,
 		"SESSION_ID_SHORT": sessionID,
 		"CCC_SESSION":      "ad-hoc", // unjoined default
-		"ROLE":             Role(entry.AgentFile, c),
+		"ROLE":             roleFrom(card, c),
 		"TITLE":            c.CustomTitle,
 		"MODEL":            c.Model.ID,
 		"PROFILE":          Profile(c),
@@ -231,8 +283,8 @@ func Vars(sessionID string, c Cache, entry MapEntry) map[string]string {
 	if len(sessionID) >= 8 {
 		vars["SESSION_ID_SHORT"] = sessionID[:8]
 	}
-	if entry.SessionDir != "" {
-		vars["CCC_SESSION"] = filepath.Base(entry.SessionDir)
+	if s := sessionFrom(card, entry); s != "" {
+		vars["CCC_SESSION"] = s
 	}
 	// NAME is the convenience resolution the default row uses: the /rename
 	// title while one exists, else the ucc profile.
