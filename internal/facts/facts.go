@@ -171,10 +171,10 @@ func roleFromFrontmatter(fm map[string]string) string {
 //  3. the stored SessionDir's basename.
 //  4. "" — unjoined; the caller shows the ad-hoc default.
 func sessionFrom(fm map[string]string, entry MapEntry) string {
-	if slug := Unquote(fm["session"]); slug != "" {
+	if slug := fm["session"]; slug != "" {
 		return slug
 	}
-	if seat := Unquote(fm["seat"]); seat != "" {
+	if seat := fm["seat"]; seat != "" {
 		seat = strings.TrimSuffix(strings.TrimPrefix(seat, "[["), "]]")
 		if i := strings.Index(seat, "/rosters/"); i > 0 {
 			return filepath.Base(seat[:i])
@@ -187,10 +187,18 @@ func sessionFrom(fm map[string]string, entry MapEntry) string {
 }
 
 // Unquote strips one pair of matching surrounding quotes from a frontmatter
-// scalar (`session: "22-18-x"` is how the engine writes it).
+// scalar (`role: "worker"` is how the engine writes it). Applied by
+// ParseFrontmatter to EVERY value, so no reader can forget: a quoted `role`
+// reached the panes as `"worker"` — visibly wrong, and invisibly wrong too,
+// since the config matches ROLE against advisor/leader/worker to pick the
+// per-role color token and a quoted value matches none of them (2026-08-23).
+//
+// The interior must hold no bare quote of the same kind, so a prose value like
+// `"a" and "b"` is left alone rather than mangled into `a" and "b`.
 func Unquote(v string) string {
 	v = strings.TrimSpace(v)
-	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] &&
+		!strings.ContainsRune(v[1:len(v)-1], rune(v[0])) {
 		return v[1 : len(v)-1]
 	}
 	return v
@@ -198,7 +206,9 @@ func Unquote(v string) string {
 
 // ParseFrontmatter matches ccc-cli parseFrontmatter: first `---` pair from
 // line 0; first-colon split; indented lines are continuations (skipped); last
-// value wins; an unclosed opener is NOT a block.
+// value wins; an unclosed opener is NOT a block. Values are Unquoted — the
+// quotes the engine writes are YAML syntax, never content, and every reader
+// here renders the value.
 func ParseFrontmatter(content string) map[string]string {
 	fields := map[string]string{}
 	lines := strings.Split(content, "\n")
@@ -224,7 +234,7 @@ func ParseFrontmatter(content string) map[string]string {
 		if colon == -1 {
 			continue
 		}
-		fields[strings.TrimSpace(line[:colon])] = strings.TrimSpace(line[colon+1:])
+		fields[strings.TrimSpace(line[:colon])] = Unquote(line[colon+1:])
 	}
 	return fields
 }

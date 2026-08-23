@@ -53,9 +53,9 @@ func TestFormatIdle(t *testing.T) {
 		unknown bool
 		want    string
 	}{
-		{0, true, ""},                          // no hook event yet
-		{-5 * time.Minute, false, ""},          // future timestamp (clock skew)
-		{30 * time.Second, false, ""},          // active session → token clear
+		{0, true, ""},                 // no hook event yet
+		{-5 * time.Minute, false, ""}, // future timestamp (clock skew)
+		{30 * time.Second, false, ""}, // active session → token clear
 		{5 * time.Minute, false, "5m"},
 		{59 * time.Minute, false, "59m"},
 		{60 * time.Minute, false, "1h"},
@@ -149,8 +149,31 @@ func TestSessionMapPrefersDaemonFile(t *testing.T) {
 	}
 }
 
+// The engine writes card scalars quoted (`role: "worker"`). A quoted ROLE
+// reached the panes twice wrong: shown as `"worker"`, and matching none of the
+// config's advisor/leader/worker arms, so the pane lost its per-role color.
+func TestRoleIsUnquoted(t *testing.T) {
+	card := filepath.Join(t.TempDir(), "agents", "7e9db8e1", "7e9db8e1.md")
+	os.MkdirAll(filepath.Dir(card), 0o755)
+	os.WriteFile(card, []byte("---\ntype: agent\nrole: \"worker\"\n---\n"), 0o644)
+	if got := Vars("7e9db8e1-5fbc", Cache{}, MapEntry{AgentFile: card})["ROLE"]; got != "worker" {
+		t.Fatalf("quoted role must render bare: %q", got)
+	}
+	// `type` as the role carrier goes through the same known-role gate.
+	os.WriteFile(card, []byte("---\ntype: \"advisor\"\n---\n"), 0o644)
+	if got := Vars("7e9db8e1-5fbc", Cache{}, MapEntry{AgentFile: card})["ROLE"]; got != "advisor" {
+		t.Fatalf("quoted type-as-role must render bare: %q", got)
+	}
+}
+
 func TestUnquote(t *testing.T) {
-	for in, want := range map[string]string{`"22-18-x"`: "22-18-x", `'a'`: "a", `bare`: "bare", `"`: `"`} {
+	for in, want := range map[string]string{
+		`"22-18-x"`:   "22-18-x",
+		`'a'`:         "a",
+		`bare`:        "bare",
+		`"`:           `"`,
+		`"a" and "b"`: `"a" and "b"`, // interior quotes → leave the value alone
+	} {
 		if got := Unquote(in); got != want {
 			t.Errorf("Unquote(%q) = %q want %q", in, got, want)
 		}
