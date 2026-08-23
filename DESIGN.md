@@ -12,8 +12,9 @@ The painter reads facts from files, all under `$UCC_HOME`:
 | Fact | Source |
 | -- | -- |
 | status, title, model, context %, cost, profile, pane binding, auq_pending | `cache/ccc-status/<sid>.json` (statusd session cache) |
-| session dir, agent file | `cache/ccc-cli/session-map.json` (ccc-cli) |
-| role | agent-file frontmatter, `last_known_role` cache fallback |
+| agent file, birth session dir | `cache/ccc-status/session-map.json` (daemon-owned; the retired `cache/ccc-cli/session-map.json` read only while the daemon file is absent) |
+| session (`{{CCC_SESSION}}`) | agent-card frontmatter `session:`, else `seat:` (path before `/rosters/`), else the birth dir's basename |
+| role | agent-card frontmatter, `last_known_role` cache fallback |
 | pane terminal title (`{{HERDR_TITLE}}`) | herdr `pane.get`, 5s throttle |
 
 `auq_pending` is the one statusd addition: a generic count stamped on AUQ
