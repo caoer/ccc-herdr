@@ -29,10 +29,22 @@ type Cache struct {
 	HerdrSocketPath string    `json:"herdr_socket_path"`
 	AUQPending      int       `json:"auq_pending"`
 	LastHookEvent   time.Time `json:"last_hook_event_time"`
-	Model           struct {
+	// LastSessionStart / LastSessionEnd are the daemon's SessionStart and
+	// SessionEnd stamps; a live session carries Go's zero time as its end.
+	LastSessionStart time.Time `json:"last_session_start_time"`
+	LastSessionEnd   time.Time `json:"last_session_end_time"`
+	Model            struct {
 		ID          string `json:"id"`
 		DisplayName string `json:"display_name"`
 	} `json:"model"`
+}
+
+// Ended reports a session whose last SessionEnd is at or after its last
+// SessionStart: the process left the pane (exit, /clear, a resume under a new
+// id). Its cache is still rewritten — on its SessionEnd, and wholesale on every
+// daemon restart — and those writes must never carry its id onto the pane.
+func (c Cache) Ended() bool {
+	return !c.LastSessionEnd.IsZero() && !c.LastSessionEnd.Before(c.LastSessionStart)
 }
 
 // MapEntry is one ccc-cli session-map record (Decision #10 schema).

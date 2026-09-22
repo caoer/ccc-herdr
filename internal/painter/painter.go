@@ -37,6 +37,11 @@ const (
 	// livePanesTTL bounds how stale the pane-liveness set may be for the
 	// event path; the sweep refreshes it every interval anyway.
 	livePanesTTL = 5 * time.Minute
+	// absentProbeFloor bounds the event path's re-probe of a pane absent from
+	// the liveness set: a pane split after the last sweep is absent by
+	// construction, so absence is a question for its server, asked at most
+	// once per pane per floor.
+	absentProbeFloor = time.Second
 	// failureRetryCooldown bounds the failure brake: a braked report retries
 	// at this cadence instead of never — SendReport cannot distinguish a
 	// transient transport failure from a permanent rejection, and "never"
@@ -90,6 +95,14 @@ type Painter struct {
 	// per-server (two servers both have a w1:p1), and because a host runs
 	// one painter across every herdr session.
 	livePanes map[string]livePaneSet
+	// absentProbe is when each pane absent from its server's set was last
+	// re-asked of that server (see paneKnownDead).
+	absentProbe map[paneKey]time.Time
+	// lastPaint is the session whose identity last reached each pane. Dedup
+	// is per session, so without it a pane relabelled by another claimant
+	// stayed wrong until the rightful seat's own content changed — its hash
+	// still matched what IT had last sent.
+	lastPaint map[paneKey]string
 
 	// sweepMu makes acquire/release/record one critical section — two
 	// independent atomics left a window where a coalesced request landed
@@ -108,11 +121,13 @@ type Painter struct {
 
 func New(cfgPath string, logger *log.Logger) *Painter {
 	p := &Painter{
-		Log:      logger,
-		CfgPath:  cfgPath,
-		sessions: map[string]*sessState{},
-		timers:   map[string]*time.Timer{},
-		quit:     make(chan struct{}),
+		Log:         logger,
+		CfgPath:     cfgPath,
+		sessions:    map[string]*sessState{},
+		timers:      map[string]*time.Timer{},
+		absentProbe: map[paneKey]time.Time{},
+		lastPaint:   map[paneKey]string{},
+		quit:        make(chan struct{}),
 	}
 	p.reloadConfig() // eager: one-shot callers (paint) never call Run
 	return p
@@ -273,6 +288,10 @@ type livePaneSet struct {
 	at    time.Time
 }
 
+// paneKey names one pane on one herdr server: pane ids are per-server (two
+// servers both have a w1:p1), and one painter serves every server on the host.
+type paneKey struct{ sock, pane string }
+
 // refreshLivePanes snapshots EVERY socket the cache binds to — one snapshot
 // per socket per sweep. A host runs one painter over every herdr session, so
 // asking only $HERDR_SOCKET_PATH left every other server's stale bindings
@@ -306,15 +325,35 @@ func (p *Painter) refreshLivePanes(sockets []string) map[string]map[string]bool 
 
 // paneKnownDead consults the last liveness set for the event path; unknown
 // or stale data — or a socket never snapshotted — never blocks a paint (the
-// dedup brake handles dead sends).
+// dedup brake handles dead sends). A pane ABSENT from a fresh set is asked of
+// its server once more before the veto holds: the set is only as new as the
+// last sweep, and a pane split since then is absent by construction — the
+// fresh seat whose first label used to wait for the next sweep.
 func (p *Painter) paneKnownDead(paneID, sockPath string) bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	set, ok := p.livePanes[sockPath]
 	if !ok || time.Since(set.at) > livePanesTTL {
+		p.mu.Unlock()
 		return false
 	}
-	return !set.panes[paneID]
+	if set.panes[paneID] {
+		p.mu.Unlock()
+		return false
+	}
+	k := paneKey{sockPath, paneID}
+	now := time.Now()
+	if now.Sub(p.absentProbe[k]) < absentProbeFloor {
+		p.mu.Unlock()
+		return true
+	}
+	p.absentProbe[k] = now
+	p.mu.Unlock()
+
+	panes, known := p.refreshLivePanes([]string{sockPath})[sockPath]
+	if !known {
+		return false // unreachable is unknown, never dead
+	}
+	return !panes[paneID]
 }
 
 // Sweep repaints every live session: lease renewal, decay, takeover.
@@ -357,7 +396,6 @@ func (p *Painter) sweepOnce() {
 		sid   string
 		cache facts.Cache
 	}
-	type paneKey struct{ sock, pane string }
 	var bound []claimant
 	sockSet := map[string]bool{}
 	seen := map[string]bool{}
@@ -374,7 +412,7 @@ func (p *Painter) sweepOnce() {
 		sid := strings.TrimSuffix(name, ".json")
 		seen[sid] = true
 		cache, err := facts.ReadCache(filepath.Join(dir, name))
-		if err != nil || cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
+		if err != nil || cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" || cache.Ended() {
 			continue
 		}
 		bound = append(bound, claimant{sid, cache})
@@ -397,11 +435,15 @@ func (p *Painter) sweepOnce() {
 	best := map[paneKey]claimant{}
 	vetoed := 0
 	for _, c := range bound {
+		k := paneKey{c.cache.HerdrSocketPath, c.cache.HerdrPaneID}
 		if panes, known := live[c.cache.HerdrSocketPath]; known && !panes[c.cache.HerdrPaneID] {
 			vetoed++
+			p.mu.Lock()
+			delete(p.lastPaint, k)
+			delete(p.absentProbe, k)
+			p.mu.Unlock()
 			continue // pane is gone — labels decay via TTL
 		}
-		k := paneKey{c.cache.HerdrSocketPath, c.cache.HerdrPaneID}
 		if cur, taken := best[k]; !taken || c.cache.LastHookEvent.After(cur.cache.LastHookEvent) {
 			best[k] = c
 		}
@@ -424,16 +466,34 @@ func (p *Painter) sweepOnce() {
 }
 
 // Repaint is the single-session entry (debounce path, CLI). force bypasses
-// dedup and the pane-liveness veto.
+// dedup and the pane-liveness veto — never the ended rule: `ccc-herdr paint`
+// with no id forces every session, ended ones included.
 func (p *Painter) Repaint(sid string, force bool) {
 	cache, err := facts.ReadCache(filepath.Join(facts.CacheDir(), sid+".json"))
 	if err != nil || cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
+		return
+	}
+	if cache.Ended() {
+		p.releasePane(cache)
 		return
 	}
 	if !force && p.paneKnownDead(cache.HerdrPaneID, cache.HerdrSocketPath) {
 		return
 	}
 	p.repaint(sid, cache, facts.LoadSessionMap()[sid], force)
+}
+
+// releasePane hands a pane back when the session that last painted it has
+// ended: the live claimant is re-elected and repainted by a sweep now, not at
+// its next content change. An ended session that never held the pane leaves
+// nothing to restore.
+func (p *Painter) releasePane(cache facts.Cache) {
+	p.mu.Lock()
+	held := p.lastPaint[paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}] == cache.SessionID
+	p.mu.Unlock()
+	if held {
+		p.Sweep()
+	}
 }
 
 // repaint composes and (dedup permitting) sends both reports. The per-
@@ -469,6 +529,7 @@ func (p *Painter) paintIdentity(st *sessState, cfg Config, cache facts.Cache, va
 	}
 	hash := report.ContentHash()
 	now := time.Now()
+	k := paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}
 	if !force {
 		// The failure brake holds only against the same socket incarnation
 		// (a moved inode is a restarted herdr that dropped all metadata) and
@@ -484,7 +545,13 @@ func (p *Painter) paintIdentity(st *sessState, cfg Config, cache facts.Cache, va
 		if braked {
 			return
 		}
-		if !shouldSend(st, hash, dev, ino, now, cfg.TTL) {
+		// Dedup holds only while this session is the pane's last painter:
+		// another claimant's report replaced ours on the pane, whatever our
+		// own hash says.
+		p.mu.Lock()
+		holds := p.lastPaint[k] == cache.SessionID
+		p.mu.Unlock()
+		if holds && !shouldSend(st, hash, dev, ino, now, cfg.TTL) {
 			return
 		}
 	}
@@ -497,6 +564,9 @@ func (p *Painter) paintIdentity(st *sessState, cfg Config, cache facts.Cache, va
 	st.hash = hash
 	st.sentAt = now
 	st.sockDev, st.sockIno = dev, ino
+	p.mu.Lock()
+	p.lastPaint[k] = cache.SessionID
+	p.mu.Unlock()
 }
 
 func (p *Painter) paintAUQ(st *sessState, cfg Config, cache facts.Cache, force bool) {

@@ -51,6 +51,15 @@ reconnect probe's endpoint, re-resolved to a reachable socket when the session
 that launched the painter goes away.
 
 - fsnotify on the cache dir → 300ms debounce per session → repaint
+- a pane absent from the last sweep's liveness set is re-asked of its server
+  (once per pane per second) before the event path calls it dead — a pane
+  split after the sweep is absent by construction, and its seat's first label
+  must not wait for the next sweep
+- an ended session (last SessionEnd at or after its last SessionStart) never
+  paints: the daemon rewrites its cache on SessionEnd and wholesale on every
+  restart. Dedup keys on the pane's last painter, so a pane relabelled by
+  another claimant is retaken on the occupant's next write, and at once when
+  the intruder ends
 - fsnotify on the config file → reload → repaint all
 - 60s sweep → lease renewal (identity TTL half-life, AUQ lease), decay
 - 3 consecutive sweeps with bindings but zero reachable sockets → exit (a

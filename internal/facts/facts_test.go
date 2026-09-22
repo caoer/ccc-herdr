@@ -186,3 +186,32 @@ func TestParseFrontmatterUnclosedIsNotABlock(t *testing.T) {
 		t.Fatalf("unclosed opener must parse empty, got %v", fm)
 	}
 }
+
+// The daemon writes Go's zero time for "no SessionEnd yet" — the literal wire
+// value on every live cache — so Ended must read that as live, an end at or
+// after the start as ended, and a start after the end (a resumed id) as live.
+func TestEndedFollowsTheDaemonWire(t *testing.T) {
+	dir := t.TempDir()
+	cases := map[string]struct {
+		body  string
+		ended bool
+	}{
+		"live":    {`{"last_session_start_time":"2026-09-22T17:33:55.039717-04:00","last_session_end_time":"0001-01-01T00:00:00Z"}`, false},
+		"ended":   {`{"last_session_start_time":"2026-09-22T17:34:17.235089-04:00","last_session_end_time":"2026-09-22T17:34:18.947609-04:00"}`, true},
+		"resumed": {`{"last_session_start_time":"2026-09-22T18:00:00-04:00","last_session_end_time":"2026-09-22T17:34:18-04:00"}`, false},
+		"never":   {`{"session_id":"x"}`, false},
+	}
+	for name, tc := range cases {
+		path := filepath.Join(dir, name+".json")
+		if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		c, err := ReadCache(path)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if c.Ended() != tc.ended {
+			t.Errorf("%s: Ended()=%v want %v", name, c.Ended(), tc.ended)
+		}
+	}
+}

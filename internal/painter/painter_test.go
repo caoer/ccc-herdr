@@ -33,6 +33,41 @@ func shortTmpDir(t *testing.T) string {
 // (panes p1/p2 live). Received lines land on the channel.
 func stubHerdr(t *testing.T) (string, chan string) {
 	t.Helper()
+	sock, lines, panes := stubHerdrDynamic(t)
+	panes.set("p1", "p2")
+	return sock, lines
+}
+
+// stubPanes is the pane set a dynamic stub answers snapshots with; a test
+// changes it between requests to model panes that appear after a sweep.
+type stubPanes struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+func (s *stubPanes) set(ids ...string) {
+	s.mu.Lock()
+	s.ids = ids
+	s.mu.Unlock()
+}
+
+func (s *stubPanes) reply() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	panes := make([]map[string]string, 0, len(s.ids))
+	for _, id := range s.ids {
+		panes = append(panes, map[string]string{"pane_id": id})
+	}
+	line, _ := json.Marshal(map[string]any{
+		"id":     "stub",
+		"result": map[string]any{"snapshot": map[string]any{"panes": panes}},
+	})
+	return append(line, '\n')
+}
+
+// stubHerdrDynamic is stubHerdr with a pane set the test controls.
+func stubHerdrDynamic(t *testing.T) (string, chan string, *stubPanes) {
+	t.Helper()
 	sock := filepath.Join(shortTmpDir(t), "herdr.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
@@ -40,7 +75,7 @@ func stubHerdr(t *testing.T) (string, chan string) {
 	}
 	t.Cleanup(func() { ln.Close() })
 	lines := make(chan string, 256)
-	reply := []byte(`{"id":"stub","result":{"snapshot":{"panes":[{"pane_id":"p1"},{"pane_id":"p2"}]}}}` + "\n")
+	panes := &stubPanes{}
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -59,14 +94,55 @@ func stubHerdr(t *testing.T) (string, chan string) {
 					case lines <- string(raw):
 					default:
 					}
-					if _, err := c.Write(reply); err != nil {
+					if _, err := c.Write(panes.reply()); err != nil {
 						return
 					}
 				}
 			}(conn)
 		}
 	}()
-	return sock, lines
+	return sock, lines, panes
+}
+
+// writeClaimant writes a cache the way the daemon does: hook recency for the
+// election, and the session's start/end times — end is Go's zero time while
+// the session lives, the daemon's literal wire value.
+func writeClaimant(t *testing.T, sid, paneID, sock string, lastHook, ended time.Time) {
+	t.Helper()
+	body := map[string]any{
+		"session_id":              sid,
+		"herdr_pane_id":           paneID,
+		"herdr_socket_path":       sock,
+		"last_known_role":         "worker",
+		"last_hook_event_time":    lastHook.Format(time.RFC3339Nano),
+		"last_session_start_time": lastHook.Add(-time.Minute).Format(time.RFC3339Nano),
+		"last_session_end_time":   ended.Format(time.RFC3339Nano),
+	}
+	data, _ := json.Marshal(body)
+	if err := os.WriteFile(filepath.Join(facts.CacheDir(), sid+".json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// tokenIDs extracts tokens.id from the identity reports on the wire, in
+// order; snapshot probes and AUQ reports carry none and are skipped.
+func tokenIDs(lines []string) []string {
+	var ids []string
+	for _, l := range lines {
+		if !json.Valid([]byte(l)) {
+			continue
+		}
+		var m struct {
+			Params struct {
+				Tokens map[string]any `json:"tokens"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal([]byte(l), &m)
+		if id, ok := m.Params.Tokens["id"].(string); ok {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 func writeSessCache(t *testing.T, sid, paneID, sock string, pending int) {
@@ -90,12 +166,19 @@ func writeSessCache(t *testing.T, sid, paneID, sock string, pending int) {
 
 func newTestPainter(t *testing.T) (*Painter, string, chan string) {
 	t.Helper()
+	p, sock, lines, panes := newTestPainterDynamic(t)
+	panes.set("p1", "p2")
+	return p, sock, lines
+}
+
+func newTestPainterDynamic(t *testing.T) (*Painter, string, chan string, *stubPanes) {
+	t.Helper()
 	t.Setenv("CCC_CACHE_DIR", t.TempDir())
 	t.Setenv("UCC_HOME", t.TempDir())
-	sock, lines := stubHerdr(t)
+	sock, lines, panes := stubHerdrDynamic(t)
 	t.Setenv("HERDR_SOCKET_PATH", sock)
 	logger := log.New(os.Stderr, "test ", 0)
-	return New(filepath.Join(t.TempDir(), "ccc-herdr.toml"), logger), sock, lines
+	return New(filepath.Join(t.TempDir(), "ccc-herdr.toml"), logger), sock, lines, panes
 }
 
 func drain(lines chan string) []string {
@@ -149,21 +232,7 @@ func TestSweepPicksNewestClaimantPerPane(t *testing.T) {
 	p.Sweep()
 	sent := drain(lines)
 	// snapshot request + the winner's identity/auq only
-	var ids []string
-	for _, l := range sent {
-		if !json.Valid([]byte(l)) {
-			continue
-		}
-		var m struct {
-			Params struct {
-				Tokens map[string]any `json:"tokens"`
-			} `json:"params"`
-		}
-		_ = json.Unmarshal([]byte(l), &m)
-		if id, ok := m.Params.Tokens["id"].(string); ok {
-			ids = append(ids, id)
-		}
-	}
+	ids := tokenIDs(sent)
 	if len(ids) != 1 || ids[0] != "new00000" {
 		t.Fatalf("exactly the newest claimant must paint pane p1, got token ids %v (wire %d lines)", ids, len(sent))
 	}
@@ -539,5 +608,98 @@ func TestProcLockHolderNamesTheHolder(t *testing.T) {
 	// not one, so seed the scan with this process to exercise the fd walk.
 	if got := procLockHolderFor([]int{os.Getpid()}); got != os.Getpid() {
 		t.Fatalf("holder of %s must be found via /proc, got %d", LockPath(), got)
+	}
+}
+
+// A pane split after the last sweep is absent from that sweep's liveness set
+// by construction, so the event path must ask the server before calling it
+// dead — or every fresh seat's first label waits for the next sweep (measured
+// on zmax: label at the :13 sweep, 11 s after SessionStart, up to 60 s).
+func TestFreshPanePaintsWithoutWaitingForSweep(t *testing.T) {
+	p, sock, lines, panes := newTestPainterDynamic(t)
+	panes.set("p1")
+	writeSessCache(t, "seated0000000000", "p1", sock, 0)
+	p.Sweep() // liveness set is now {p1}
+	drain(lines)
+
+	panes.set("p1", "p3") // split after the sweep
+	writeSessCache(t, "fresh00000000000", "p3", sock, 0)
+	p.Repaint("fresh00000000000", false)
+	if ids := tokenIDs(drain(lines)); len(ids) != 1 || ids[0] != "fresh000" {
+		t.Fatalf("a pane newer than the sweep snapshot must paint on its first cache write, got %v", ids)
+	}
+
+	// A pane the server does not know stays vetoed after the re-probe.
+	writeSessCache(t, "gone000000000000", "p9", sock, 0)
+	p.Repaint("gone000000000000", false)
+	if ids := tokenIDs(drain(lines)); len(ids) != 0 {
+		t.Fatalf("a pane absent from a fresh snapshot must stay vetoed, got %v", ids)
+	}
+}
+
+// The daemon rewrites every cache on restart and on each SessionEnd; an ended
+// session's write must never carry its id onto the pane — usage probes ending
+// within a second were relabelling their launcher's pane every ten minutes.
+func TestEndedSessionNeverPaints(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	writeClaimant(t, "ended00000000000", "p1", sock, time.Now(), time.Now())
+
+	p.Repaint("ended00000000000", false)
+	if got := metadataReports(drain(lines)); len(got) != 0 {
+		t.Fatalf("an ended session must not paint, sent %v", got)
+	}
+	// `ccc-herdr paint` with no id forces EVERY session — ended ones included.
+	p.Repaint("ended00000000000", true)
+	if got := metadataReports(drain(lines)); len(got) != 0 {
+		t.Fatalf("an ended session must not paint even under force, sent %v", got)
+	}
+}
+
+func TestSweepElectionSkipsEndedClaimants(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	writeClaimant(t, "live000000000000", "p1", sock, time.Now().Add(-time.Hour), time.Time{})
+	writeClaimant(t, "ended00000000000", "p1", sock, time.Now(), time.Now()) // newest, but over
+
+	p.Sweep()
+	if ids := tokenIDs(drain(lines)); len(ids) != 1 || ids[0] != "live0000" {
+		t.Fatalf("the newest LIVE claimant must paint the pane, got %v", ids)
+	}
+}
+
+// Dedup is per session, so a pane relabelled by another claimant used to stay
+// wrong until the rightful seat's own content changed — its hash still matched
+// what IT last sent. What matters is who painted the PANE last.
+func TestRelabelledPaneIsRetakenOnTheOccupantsNextWrite(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	writeSessCache(t, "occupant00000000", "p1", sock, 0)
+	writeSessCache(t, "intruder00000000", "p1", sock, 0)
+	p.Repaint("occupant00000000", false)
+	p.Repaint("intruder00000000", false)
+	drain(lines)
+
+	p.Repaint("occupant00000000", false) // content unchanged since its last send
+	if ids := tokenIDs(drain(lines)); len(ids) != 1 || ids[0] != "occupant" {
+		t.Fatalf("the occupant's next write must retake the pane, got %v", ids)
+	}
+	p.Repaint("occupant00000000", false)
+	if ids := tokenIDs(drain(lines)); len(ids) != 0 {
+		t.Fatalf("holding the pane with unchanged content must still dedup, got %v", ids)
+	}
+}
+
+// The intruder's own SessionEnd is the moment to hand the pane back: the live
+// claimant is re-elected and repainted then, not at its next content change.
+func TestEndedIntruderHandsThePaneBack(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	writeClaimant(t, "occupant00000000", "p1", sock, time.Now().Add(-time.Minute), time.Time{})
+	writeClaimant(t, "intruder00000000", "p1", sock, time.Now(), time.Time{})
+	p.Repaint("occupant00000000", false)
+	p.Repaint("intruder00000000", false)
+	drain(lines)
+
+	writeClaimant(t, "intruder00000000", "p1", sock, time.Now(), time.Now()) // its SessionEnd
+	p.Repaint("intruder00000000", false)
+	if ids := tokenIDs(drain(lines)); len(ids) != 1 || ids[0] != "occupant" {
+		t.Fatalf("the ended intruder's write must repaint the live occupant, got %v", ids)
 	}
 }
