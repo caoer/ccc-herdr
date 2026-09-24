@@ -44,18 +44,38 @@ func TestRowUnselectedFillsWidth(t *testing.T) {
 	}
 }
 
-// ←/→ steps the band filter through non-empty bands only, then back to all.
-func TestCycleBandSkipsEmpty(t *testing.T) {
+// ← from all lands on the last tab, advisor; → walks all, the non-empty
+// bands in LED order, then worker, leader, advisor, and wraps.
+func TestTabsEndWithRoles(t *testing.T) {
 	m := New(build(""))
-	want := []Band{BandWorking, BandExpired, BandNone, AnyBand}
+	m.cycleTab(-1)
+	if m.tab.role != "advisor" || len(m.view) != 1 || m.candidates[m.view[0]].PaneID != "w2:p1" {
+		t.Fatalf("← from all: tab %+v view %v", m.tab, m.view)
+	}
+	want := []tab{allTab, {band: BandWorking}, {band: BandExpired}, {band: BandNone},
+		{band: AnyBand, role: "worker"}, {band: AnyBand, role: "leader"}, {band: AnyBand, role: "advisor"}}
 	for _, w := range want {
-		m.cycleBand(1)
-		if m.band != w {
-			t.Fatalf("cycle: got %d want %d", m.band, w)
+		m.cycleTab(1)
+		if m.tab != w {
+			t.Fatalf("→: got %+v want %+v", m.tab, w)
 		}
 	}
-	m.cycleBand(-1)
-	if m.band != BandNone || len(m.view) != 2 { // the two plain panes
-		t.Fatalf("reverse cycle: band %d view %v", m.band, m.view)
+	m.cycleTab(-2)
+	if m.tab.role != "worker" || len(m.view) != 1 || m.candidates[m.view[0]].Role != "worker" {
+		t.Fatalf("worker tab (role_worker token): %+v %v", m.tab, m.view)
+	}
+}
+
+// The path column appears only when the title keeps its room beside it.
+func TestPathColumnOnlyWhenWide(t *testing.T) {
+	m := New(build(""))
+	c := m.candidates[0] // the worker, with a terminal title and a cwd
+	m.width = 100
+	if strings.Contains(m.row(c, false), "ad3009b4/") {
+		t.Fatal("narrow popup must skip the path column")
+	}
+	m.width = 180
+	if !strings.Contains(m.row(c, false), "ad3009b4/meridian-rs") {
+		t.Fatalf("wide popup must show the path: %q", m.row(c, false))
 	}
 }

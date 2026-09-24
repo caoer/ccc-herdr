@@ -30,9 +30,9 @@ func snapshotFixture() *herdr.Snapshot {
 			{
 				PaneID: "w1:p2", TabID: "w1:t1", WorkspaceID: "w1",
 				Agent: "claude", AgentStatus: "working",
-				TerminalTitle: "Spawn lineage backfill",
+				TerminalTitle: "Spawn lineage backfill", Cwd: "/Users/x/work/ad3009b4/meridian-rs",
 				Tokens: map[string]string{
-					"id": "ad3009b4", "role": "worker",
+					"id": "ad3009b4", "role_worker": "worker",
 					"session": "02-00-adhoc", "profile": "grid-mullein1b",
 				},
 			},

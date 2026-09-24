@@ -16,8 +16,14 @@ var (
 	helpStyle   = lipgloss.NewStyle().Faint(true)
 	selectedBg  = lipgloss.Color("237")
 	idStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
-	roleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
-	faintStyle  = lipgloss.NewStyle().Faint(true)
+	// roleStyles match the herdr sidebar's $role_* token colors.
+	roleStyles = map[string]lipgloss.Style{
+		"worker":  lipgloss.NewStyle().Foreground(lipgloss.Color("#31824d")),
+		"leader":  lipgloss.NewStyle().Foreground(lipgloss.Color("#4275b6")),
+		"advisor": lipgloss.NewStyle().Foreground(lipgloss.Color("#8c63aa")).Bold(true),
+	}
+	otherRoleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	faintStyle     = lipgloss.NewStyle().Faint(true)
 )
 
 // Model is the jumper TUI: a query line over a fuzzy-filtered candidate list.
@@ -25,8 +31,9 @@ type Model struct {
 	candidates []Candidate
 	view       []int
 	query      string
-	band       Band           // AnyBand, or the one band shown
+	tab        tab            // the active filter tab
 	counts     [bandCount]int // per band, over the query's matches
+	roleCounts map[string]int // per role, over the query's matches
 	cursor     int
 	width      int
 	height     int
@@ -36,7 +43,7 @@ type Model struct {
 func New(candidates []Candidate) Model {
 	m := Model{
 		candidates: candidates,
-		band:       AnyBand,
+		tab:        allTab,
 		width:      100,
 		height:     20,
 	}
@@ -49,32 +56,66 @@ func (m Model) Choice() string { return m.choice }
 
 func (m Model) Init() tea.Cmd { return nil }
 
+// tab is one filter on the tab row: all, one cache band, or one role.
+type tab struct {
+	band Band   // AnyBand unless a band tab
+	role string // "" unless a role tab
+}
+
+var allTab = tab{band: AnyBand}
+
+func (t tab) keeps(c Candidate) bool {
+	switch {
+	case t.role != "":
+		return c.Role == t.role
+	case t.band != AnyBand:
+		return c.Band == t.band
+	}
+	return true
+}
+
+// tabs is the tab row: all, each non-empty band in the LED's order, then
+// worker, leader, advisor — always present and last, so ← from all lands on
+// advisor.
+func (m Model) tabs() []tab {
+	out := []tab{allTab}
+	for b := Band(0); b < bandCount; b++ {
+		if m.counts[b] > 0 || m.tab.band == b {
+			out = append(out, tab{band: b})
+		}
+	}
+	for _, r := range Roles {
+		out = append(out, tab{band: AnyBand, role: r})
+	}
+	return out
+}
+
 func (m *Model) refilter() {
 	matched := Filter(m.candidates, m.query, AnyBand)
 	m.counts = [bandCount]int{}
+	m.roleCounts = map[string]int{}
+	m.view = m.view[:0:0]
 	for _, i := range matched {
-		m.counts[m.candidates[i].Band]++
-	}
-	m.view = matched
-	if m.band != AnyBand {
-		m.view = Filter(m.candidates, m.query, m.band)
+		c := m.candidates[i]
+		m.counts[c.Band]++
+		m.roleCounts[c.Role]++
+		if m.tab.keeps(c) {
+			m.view = append(m.view, i)
+		}
 	}
 	m.cursor = 0
 }
 
-// cycleBand steps the band filter through all → each non-empty band → all.
-func (m *Model) cycleBand(step int) {
-	for range bandCount + 1 {
-		m.band += Band(step)
-		if m.band < AnyBand {
-			m.band = bandCount - 1
-		} else if m.band >= bandCount {
-			m.band = AnyBand
-		}
-		if m.band == AnyBand || m.counts[m.band] > 0 {
-			break
+// cycleTab steps the tab row, wrapping at both ends.
+func (m *Model) cycleTab(step int) {
+	tabs := m.tabs()
+	cur := 0
+	for i, t := range tabs {
+		if t == m.tab {
+			cur = i
 		}
 	}
+	m.tab = tabs[(cur+step+len(tabs))%len(tabs)]
 	m.refilter()
 }
 
@@ -101,10 +142,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "right":
-			m.cycleBand(1)
+			m.cycleTab(1)
 			return m, nil
 		case "left":
-			m.cycleBand(-1)
+			m.cycleTab(-1)
 			return m, nil
 		case "up", "ctrl+p", "shift+tab":
 			if m.cursor > 0 {
@@ -173,38 +214,39 @@ func (m Model) View() tea.View {
 	if len(m.view) == 0 {
 		lines = append(lines, faintStyle.Render("   no matching pane"))
 	}
-	lines = append(lines, helpStyle.Render(" ↑↓ move · ←→ cache band · enter jump · esc dismiss"))
+	lines = append(lines, helpStyle.Render(" ↑↓ move · ←→ tab · enter jump · esc dismiss"))
 
 	view := tea.NewView(strings.Join(lines, "\n"))
 	view.AltScreen = true
 	return view
 }
 
-// bandBar lists every non-empty band with its count in the LED's colors;
-// the active filter is reversed.
+// bandBar is the tab row: all, each non-empty cache band in the LED's
+// colors, then the roles in the sidebar's colors; the active tab is reversed.
 func (m Model) bandBar() string {
 	total := 0
 	for _, n := range m.counts {
 		total += n
 	}
-	item := func(label string, active bool, s lipgloss.Style) string {
-		if active {
+	parts := make([]string, 0, 12)
+	for _, t := range m.tabs() {
+		label, s := fmt.Sprintf("all %d", total), lipgloss.NewStyle()
+		switch {
+		case t.role != "":
+			label, s = fmt.Sprintf("%s %d", t.role, m.roleCounts[t.role]), roleStyles[t.role]
+		case t.band != AnyBand:
+			label, s = fmt.Sprintf("● %d %s", m.counts[t.band], t.band.Name()), t.band.Style()
+		}
+		if t == m.tab {
 			s = s.Reverse(true).Bold(true)
 		}
-		return s.Render(" " + label + " ")
-	}
-	parts := []string{item(fmt.Sprintf("all %d", total), m.band == AnyBand, lipgloss.NewStyle())}
-	for b := Band(0); b < bandCount; b++ {
-		if m.counts[b] == 0 {
-			continue
-		}
-		parts = append(parts, item(fmt.Sprintf("● %d %s", m.counts[b], b.Name()), m.band == b, b.Style()))
+		parts = append(parts, s.Render(" "+label+" "))
 	}
 	return truncate(" "+strings.Join(parts, " "), m.width)
 }
 
 // row renders one candidate line: band dot, id, role, name, activity age,
-// cache time left, title,
+// cache time left, working directory when the popup is wide enough, title,
 // and a right-aligned workspace·tab location. Every segment's Render ends in
 // a full SGR reset, so a selection background must ride on EACH segment —
 // wrapping the finished line in one background style paints only up to the
@@ -244,21 +286,53 @@ func (m Model) row(c Candidate, selected bool) string {
 
 	left := plain.Render(" ") + bandStyle.Render(dot) + plain.Render(" ") +
 		sty(idStyle).Render(pad(id, 9)) + plain.Render(" ") +
-		sty(roleStyle).Render(pad(c.Role, 7)) + plain.Render(" ") +
+		sty(roleStyle(c.Role)).Render(pad(c.Role, 7)) + plain.Render(" ") +
 		plain.Render(pad(name, 16)) + plain.Render(" ") +
 		bandStyle.Render(pad(c.AgeText(), 6)) + plain.Render(" ") +
 		bandStyle.Render(pad(c.TTLText(), 8)) + plain.Render(" ")
 	locRendered := sty(faintStyle).Render(location) + plain.Render(" ")
 	titleWidth := m.width - lipgloss.Width(left) - lipgloss.Width(locRendered) - 1
+	// The path column only when the title keeps minTitle cells beside it;
+	// a title that already is the path (no terminal title) needs no copy.
+	path := ""
+	if c.Title != "" && c.Dir != "" && titleWidth-pathWidth-1 >= minTitle {
+		path = sty(faintStyle).Render(pad(truncateLeft(c.Dir, pathWidth), pathWidth)) + plain.Render(" ")
+		titleWidth -= pathWidth + 1
+	}
 	if titleWidth < 4 {
 		titleWidth = 4
 	}
-	line := left + plain.Render(pad(truncate(title, titleWidth), titleWidth)+" ") + locRendered
+	line := left + path + plain.Render(pad(truncate(title, titleWidth), titleWidth)+" ") + locRendered
 	// Fill to full width so the selection band spans the whole popup row.
 	if fill := m.width - lipgloss.Width(line); fill > 0 {
 		line += plain.Render(strings.Repeat(" ", fill))
 	}
 	return truncate(line, m.width)
+}
+
+// pathWidth is the path column; minTitle the title room it must leave.
+const (
+	pathWidth = 32
+	minTitle  = 24
+)
+
+func roleStyle(role string) lipgloss.Style {
+	if s, ok := roleStyles[role]; ok {
+		return s
+	}
+	return otherRoleStyle
+}
+
+// truncateLeft keeps a path's tail — the directory names that identify it.
+func truncateLeft(s string, w int) string {
+	if lipgloss.Width(s) <= w {
+		return s
+	}
+	runes := []rune(s)
+	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > w {
+		runes = runes[1:]
+	}
+	return "…" + string(runes)
 }
 
 func pad(s string, w int) string {

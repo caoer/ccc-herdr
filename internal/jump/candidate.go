@@ -78,7 +78,7 @@ func Build(snap *herdr.Snapshot, selfPane string, caches map[string]facts.Cache,
 			IsAgent:   p.Agent != "",
 			ID:        p.Tokens["id"],
 			Name:      name,
-			Role:      p.Tokens["role"],
+			Role:      roleOf(p.Tokens),
 			Session:   p.Tokens["session"],
 			Title:     p.TerminalTitle,
 			Dir:       abbreviate(dir, home),
@@ -183,4 +183,19 @@ func (c Candidate) TTLText() string {
 		return facts.FormatIdle(left, false) + " left"
 	}
 	return ""
+}
+
+// Roles are the per-role painter tokens (role_worker / role_leader /
+// role_advisor, exactly one nonempty), in tab order.
+var Roles = []string{"worker", "leader", "advisor"}
+
+// roleOf reads the pane's role: the painter writes a known role into its
+// per-role token and only an unknown one into plain `role`.
+func roleOf(tokens map[string]string) string {
+	for _, r := range Roles {
+		if v := tokens["role_"+r]; v != "" {
+			return v
+		}
+	}
+	return tokens["role"]
 }
