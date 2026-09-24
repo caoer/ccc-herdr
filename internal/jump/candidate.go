@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/caoer/ccc-herdr/internal/facts"
 	"github.com/caoer/ccc-herdr/internal/herdr"
 )
 
@@ -17,11 +19,13 @@ type Candidate struct {
 	Tab       string
 	Status    string // agent_status: working / idle / done / blocked / unknown
 	IsAgent   bool
-	ID        string // ccc session short id (tokens.id)
-	Name      string // tokens.name, else profile, else display_agent
-	Role      string // tokens.role
-	Session   string // tokens.session
-	Idle      string // tokens.idle — time since last hook event, "" while active
+	ID        string        // ccc session short id (tokens.id)
+	Name      string        // tokens.name, else profile, else display_agent
+	Role      string        // tokens.role
+	Session   string        // tokens.session
+	Band      Band          // prompt-cache band, the desk LED's classes
+	Age       time.Duration // since last activity (statusd's LIVENESS clock)
+	AgeKnown  bool
 	Title     string // stripped terminal title
 	Dir       string // foreground cwd, home-abbreviated
 	Seq       int    // agent activity counter, recency proxy
@@ -30,8 +34,12 @@ type Candidate struct {
 }
 
 // Build flattens a snapshot into candidates, excluding selfPane (the popup's
-// own pane). Order: agents by recency, then plain panes.
-func Build(snap *herdr.Snapshot, selfPane string) []Candidate {
+// own pane). caches (facts.LiveByShort) joins each pane's `id` token to its
+// session cache for the activity clock, status and pending AUQ; a pane
+// without one falls back to herdr's agent_status and has no age.
+// Order: band (the LED's order), then freshest activity, then recency, with
+// plain panes after agents.
+func Build(snap *herdr.Snapshot, selfPane string, caches map[string]facts.Cache, now time.Time) []Candidate {
 	tabs := make(map[string]string, len(snap.Tabs))
 	for _, t := range snap.Tabs {
 		tabs[t.TabID] = t.Label
@@ -72,10 +80,22 @@ func Build(snap *herdr.Snapshot, selfPane string) []Candidate {
 			Name:      name,
 			Role:      p.Tokens["role"],
 			Session:   p.Tokens["session"],
-			Idle:      p.Tokens["idle"],
 			Title:     p.TerminalTitle,
 			Dir:       abbreviate(dir, home),
 			Seq:       seqs[p.PaneID],
+		}
+		blocked, working := p.AgentStatus == "blocked", p.AgentStatus == "working"
+		if cache, ok := caches[c.ID]; ok && c.ID != "" {
+			blocked = blocked || cache.AUQPending > 0
+			working = cache.Status == "working"
+			if last := cache.LastActivity(); !last.IsZero() {
+				c.Age, c.AgeKnown = max(now.Sub(last), 0), true
+			}
+		}
+		if c.IsAgent {
+			c.Band = classify(blocked, working, c.Age, c.AgeKnown)
+		} else {
+			c.Band = BandNone
 		}
 		c.haystack = strings.ToLower(strings.Join([]string{
 			c.ID, name, p.Tokens["profile"], c.Role, c.Session,
@@ -86,8 +106,14 @@ func Build(snap *herdr.Snapshot, selfPane string) []Candidate {
 
 	sort.SliceStable(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
+		if a.Band != b.Band {
+			return a.Band < b.Band
+		}
 		if a.IsAgent != b.IsAgent {
 			return a.IsAgent
+		}
+		if a.AgeKnown && b.AgeKnown && a.Age != b.Age {
+			return a.Age < b.Age
 		}
 		if a.Seq != b.Seq {
 			return a.Seq > b.Seq
@@ -99,10 +125,14 @@ func Build(snap *herdr.Snapshot, selfPane string) []Candidate {
 
 // Filter returns indexes into candidates that match query, best first.
 // Candidate order breaks score ties, so the empty query keeps Build's order.
-func Filter(candidates []Candidate, query string) []int {
+// band < 0 keeps every band; otherwise only candidates in that band.
+func Filter(candidates []Candidate, query string, band Band) []int {
 	type hit struct{ idx, score int }
 	hits := make([]hit, 0, len(candidates))
 	for i, c := range candidates {
+		if band >= 0 && c.Band != band {
+			continue
+		}
 		if s, ok := Score(query, c.haystack); ok {
 			hits = append(hits, hit{i, s})
 		}
@@ -125,4 +155,32 @@ func abbreviate(dir, home string) string {
 // Base returns the last path segment of the candidate's directory.
 func (c Candidate) Base() string {
 	return filepath.Base(c.Dir)
+}
+
+// AgeText is the time since last activity ("<1m", "42m", "2h39m", "1d3h");
+// "" when unknown.
+func (c Candidate) AgeText() string {
+	if !c.AgeKnown {
+		return ""
+	}
+	if c.Age < time.Minute {
+		return "<1m"
+	}
+	return facts.FormatIdle(c.Age, false)
+}
+
+// TTLText is what is left of the prompt cache: "12m left" in an idle band,
+// "expired" past it, "" for blocked, working and unknown.
+func (c Candidate) TTLText() string {
+	switch {
+	case c.Band == BandExpired:
+		return "expired"
+	case c.Band >= BandIdle10 && c.Band <= BandIdle60:
+		left := (cacheTTL - c.Age).Truncate(time.Minute)
+		if left < time.Minute {
+			return "<1m left"
+		}
+		return facts.FormatIdle(left, false) + " left"
+	}
+	return ""
 }

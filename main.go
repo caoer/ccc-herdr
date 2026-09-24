@@ -30,9 +30,11 @@ import (
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/caoer/ccc-herdr/internal/facts"
 	"github.com/caoer/ccc-herdr/internal/herdr"
 	"github.com/caoer/ccc-herdr/internal/jump"
 	"github.com/caoer/ccc-herdr/internal/openfile"
@@ -105,7 +107,7 @@ func candidates() (*herdr.Client, []jump.Candidate, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return client, jump.Build(snap, os.Getenv("HERDR_PANE_ID")), nil
+	return client, jump.Build(snap, os.Getenv("HERDR_PANE_ID"), facts.LiveByShort(), time.Now()), nil
 }
 
 // runJumper runs the fuzzy finder inside the popup and focuses the choice.
@@ -118,7 +120,7 @@ func runJumper() int {
 	}
 
 	if query := os.Getenv("CCC_HERDR_SELECT"); query != "" {
-		matches := jump.Filter(cands, query)
+		matches := jump.Filter(cands, query, jump.AnyBand)
 		if len(matches) == 0 {
 			return fail(fmt.Errorf("no pane matches %q", query))
 		}
@@ -155,7 +157,7 @@ func runFocus(args []string) int {
 	for _, a := range args {
 		query += a + " "
 	}
-	matches := jump.Filter(cands, query)
+	matches := jump.Filter(cands, query, jump.AnyBand)
 	if len(matches) == 0 {
 		return fail(fmt.Errorf("no pane matches %q", query))
 	}
@@ -301,15 +303,16 @@ func runOpenExec() int {
 	return 0
 }
 
-// runList prints the candidate table, best-recency first.
+// runList prints the candidate table in the popup's order: LED band, then
+// freshest activity.
 func runList() int {
 	_, cands, err := candidates()
 	if err != nil {
 		return fail(err)
 	}
 	for _, c := range cands {
-		fmt.Printf("%-8s %-9s %-8s %-18s %-9s %-6s %-40s %s·%s\n",
-			c.PaneID, c.ID, c.Role, c.Name, c.Status, c.Idle, c.Title, c.Workspace, c.Tab)
+		fmt.Printf("%-8s %-9s %-8s %-18s %-8s %-6s %-9s %-40s %s·%s\n",
+			c.PaneID, c.ID, c.Role, c.Name, c.Band.Name(), c.AgeText(), c.TTLText(), c.Title, c.Workspace, c.Tab)
 	}
 	return 0
 }

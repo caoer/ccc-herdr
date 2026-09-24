@@ -29,6 +29,12 @@ type Cache struct {
 	HerdrSocketPath string    `json:"herdr_socket_path"`
 	AUQPending      int       `json:"auq_pending"`
 	LastHookEvent   time.Time `json:"last_hook_event_time"`
+	// LastAPIMessage is the transcript's last main-chain API message — the
+	// daemon's activity clock; LastUserSubmit / LastStopHook are its fallback
+	// for caches predating the field. See LastActivity.
+	LastAPIMessage time.Time `json:"last_api_message_time"`
+	LastUserSubmit time.Time `json:"last_user_submit_time"`
+	LastStopHook   time.Time `json:"last_stop_hook_time"`
 	// LastSessionStart / LastSessionEnd are the daemon's SessionStart and
 	// SessionEnd stamps; a live session carries Go's zero time as its end.
 	LastSessionStart time.Time `json:"last_session_start_time"`
@@ -45,6 +51,23 @@ type Cache struct {
 // daemon restart — and those writes must never carry its id onto the pane.
 func (c Cache) Ended() bool {
 	return !c.LastSessionEnd.IsZero() && !c.LastSessionEnd.Before(c.LastSessionStart)
+}
+
+// LastActivity is the session's last real activity, computed exactly as
+// `ccc-statusd session list` computes LIVENESS (cmd/session/list.go) — the
+// clock the desk LED's cache bands read. Never LastHookEvent: daemon-side
+// events re-stamp it on sessions that did nothing. Zero when unknown.
+func (c Cache) LastActivity() time.Time {
+	if !c.LastAPIMessage.IsZero() {
+		return c.LastAPIMessage
+	}
+	last := c.LastUserSubmit
+	for _, t := range []time.Time{c.LastStopHook, c.LastSessionEnd} {
+		if t.After(last) {
+			last = t
+		}
+	}
+	return last
 }
 
 // MapEntry is one ccc-cli session-map record (Decision #10 schema).
@@ -300,7 +323,7 @@ func Vars(sessionID string, c Cache, entry MapEntry) map[string]string {
 		"CONTEXT_TOKENS":   itoa(c.ContextTokens),
 		"CONTEXT_PERCENT":  itoa(c.ContextPercent),
 		"COST":             trimFloat(c.Cost),
-		"IDLE":             formatIdle(time.Since(c.LastHookEvent), c.LastHookEvent.IsZero()),
+		"IDLE":             FormatIdle(time.Since(c.LastActivity()), c.LastActivity().IsZero()),
 	}
 	if len(sessionID) >= 8 {
 		vars["SESSION_ID_SHORT"] = sessionID[:8]
@@ -325,12 +348,12 @@ func Vars(sessionID string, c Cache, entry MapEntry) map[string]string {
 	return vars
 }
 
-// formatIdle renders time since the last hook event, minute-truncated so the
+// FormatIdle renders time since the last activity, minute-truncated so the
 // identity content hash changes at most once a minute (one sweep-driven send
 // per session per minute, not per repaint). Under a minute — an ACTIVE
 // session — renders empty (token clear): idle is a marker for quiet panes,
 // not a stopwatch on busy ones. Unknown or future timestamps render empty.
-func formatIdle(d time.Duration, unknown bool) string {
+func FormatIdle(d time.Duration, unknown bool) string {
 	if unknown || d < time.Minute {
 		return ""
 	}
@@ -366,4 +389,32 @@ func trimFloat(f float64) string {
 		return ""
 	}
 	return strconv.FormatFloat(f, 'f', 2, 64)
+}
+
+// LiveByShort reads every session cache that has not ended, keyed by the
+// 8-char short id the painter writes into a pane's `id` token. Two caches on
+// one short id keep the later SessionStart. Unreadable files are skipped.
+func LiveByShort() map[string]Cache {
+	dir := CacheDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]Cache, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") || len(name) < 8+len(".json") || name == "session-map.json" {
+			continue
+		}
+		c, err := ReadCache(filepath.Join(dir, name))
+		if err != nil || c.Ended() {
+			continue
+		}
+		short := name[:8]
+		if cur, ok := out[short]; ok && !c.LastSessionStart.After(cur.LastSessionStart) {
+			continue
+		}
+		out[short] = c
+	}
+	return out
 }

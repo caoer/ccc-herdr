@@ -11,21 +11,13 @@ import (
 )
 
 var (
-	promptStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
-	countStyle    = lipgloss.NewStyle().Faint(true)
-	helpStyle     = lipgloss.NewStyle().Faint(true)
-	selectedBg    = lipgloss.Color("237")
-	idStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
-	roleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
-	idleStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("172"))
-	faintStyle    = lipgloss.NewStyle().Faint(true)
-
-	statusStyles = map[string]lipgloss.Style{
-		"working": lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
-		"idle":    lipgloss.NewStyle().Foreground(lipgloss.Color("114")),
-		"done":    lipgloss.NewStyle().Foreground(lipgloss.Color("75")),
-		"blocked": lipgloss.NewStyle().Foreground(lipgloss.Color("203")),
-	}
+	promptStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111"))
+	countStyle  = lipgloss.NewStyle().Faint(true)
+	helpStyle   = lipgloss.NewStyle().Faint(true)
+	selectedBg  = lipgloss.Color("237")
+	idStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
+	roleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("179"))
+	faintStyle  = lipgloss.NewStyle().Faint(true)
 )
 
 // Model is the jumper TUI: a query line over a fuzzy-filtered candidate list.
@@ -33,6 +25,8 @@ type Model struct {
 	candidates []Candidate
 	view       []int
 	query      string
+	band       Band           // AnyBand, or the one band shown
+	counts     [bandCount]int // per band, over the query's matches
 	cursor     int
 	width      int
 	height     int
@@ -40,12 +34,14 @@ type Model struct {
 }
 
 func New(candidates []Candidate) Model {
-	return Model{
+	m := Model{
 		candidates: candidates,
-		view:       Filter(candidates, ""),
+		band:       AnyBand,
 		width:      100,
 		height:     20,
 	}
+	m.refilter()
+	return m
 }
 
 // Choice returns the selected pane id, or "" when dismissed.
@@ -54,8 +50,32 @@ func (m Model) Choice() string { return m.choice }
 func (m Model) Init() tea.Cmd { return nil }
 
 func (m *Model) refilter() {
-	m.view = Filter(m.candidates, m.query)
+	matched := Filter(m.candidates, m.query, AnyBand)
+	m.counts = [bandCount]int{}
+	for _, i := range matched {
+		m.counts[m.candidates[i].Band]++
+	}
+	m.view = matched
+	if m.band != AnyBand {
+		m.view = Filter(m.candidates, m.query, m.band)
+	}
 	m.cursor = 0
+}
+
+// cycleBand steps the band filter through all → each non-empty band → all.
+func (m *Model) cycleBand(step int) {
+	for range bandCount + 1 {
+		m.band += Band(step)
+		if m.band < AnyBand {
+			m.band = bandCount - 1
+		} else if m.band >= bandCount {
+			m.band = AnyBand
+		}
+		if m.band == AnyBand || m.counts[m.band] > 0 {
+			break
+		}
+	}
+	m.refilter()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -80,6 +100,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.choice = m.candidates[m.view[m.cursor]].PaneID
 			}
 			return m, tea.Quit
+		case "right":
+			m.cycleBand(1)
+			return m, nil
+		case "left":
+			m.cycleBand(-1)
+			return m, nil
 		case "up", "ctrl+p", "shift+tab":
 			if m.cursor > 0 {
 				m.cursor--
@@ -130,7 +156,7 @@ func (m Model) View() tea.View {
 	}
 	header := prompt + strings.Repeat(" ", gap) + count
 
-	rows := m.height - 2
+	rows := m.height - 3
 	if rows < 1 {
 		rows = 1
 	}
@@ -140,21 +166,45 @@ func (m Model) View() tea.View {
 	}
 
 	lines := make([]string, 0, rows+2)
-	lines = append(lines, header)
+	lines = append(lines, header, m.bandBar())
 	for i := offset; i < len(m.view) && i < offset+rows; i++ {
 		lines = append(lines, m.row(m.candidates[m.view[i]], i == m.cursor))
 	}
 	if len(m.view) == 0 {
 		lines = append(lines, faintStyle.Render("   no matching pane"))
 	}
-	lines = append(lines, helpStyle.Render(" ↑↓ move · enter jump · esc dismiss"))
+	lines = append(lines, helpStyle.Render(" ↑↓ move · ←→ cache band · enter jump · esc dismiss"))
 
 	view := tea.NewView(strings.Join(lines, "\n"))
 	view.AltScreen = true
 	return view
 }
 
-// row renders one candidate line: status dot, id, role, name, idle, title,
+// bandBar lists every non-empty band with its count in the LED's colors;
+// the active filter is reversed.
+func (m Model) bandBar() string {
+	total := 0
+	for _, n := range m.counts {
+		total += n
+	}
+	item := func(label string, active bool, s lipgloss.Style) string {
+		if active {
+			s = s.Reverse(true).Bold(true)
+		}
+		return s.Render(" " + label + " ")
+	}
+	parts := []string{item(fmt.Sprintf("all %d", total), m.band == AnyBand, lipgloss.NewStyle())}
+	for b := Band(0); b < bandCount; b++ {
+		if m.counts[b] == 0 {
+			continue
+		}
+		parts = append(parts, item(fmt.Sprintf("● %d %s", m.counts[b], b.Name()), m.band == b, b.Style()))
+	}
+	return truncate(" "+strings.Join(parts, " "), m.width)
+}
+
+// row renders one candidate line: band dot, id, role, name, activity age,
+// cache time left, title,
 // and a right-aligned workspace·tab location. Every segment's Render ends in
 // a full SGR reset, so a selection background must ride on EACH segment —
 // wrapping the finished line in one background style paints only up to the
@@ -168,9 +218,10 @@ func (m Model) row(c Candidate, selected bool) string {
 	}
 	plain := sty(lipgloss.NewStyle())
 
-	dot, dotStyle := "·", plain
-	if s, ok := statusStyles[c.Status]; ok && c.IsAgent {
-		dot, dotStyle = "●", sty(s)
+	bandStyle := sty(c.Band.Style())
+	dot := "·"
+	if c.IsAgent {
+		dot = "●"
 	}
 
 	id := c.ID
@@ -191,11 +242,12 @@ func (m Model) row(c Candidate, selected bool) string {
 		location += "·" + c.Tab
 	}
 
-	left := plain.Render(" ") + dotStyle.Render(dot) + plain.Render(" ") +
+	left := plain.Render(" ") + bandStyle.Render(dot) + plain.Render(" ") +
 		sty(idStyle).Render(pad(id, 9)) + plain.Render(" ") +
 		sty(roleStyle).Render(pad(c.Role, 7)) + plain.Render(" ") +
 		plain.Render(pad(name, 16)) + plain.Render(" ") +
-		sty(idleStyle).Render(pad(c.Idle, 6)) + plain.Render(" ")
+		bandStyle.Render(pad(c.AgeText(), 6)) + plain.Render(" ") +
+		bandStyle.Render(pad(c.TTLText(), 8)) + plain.Render(" ")
 	locRendered := sty(faintStyle).Render(location) + plain.Render(" ")
 	titleWidth := m.width - lipgloss.Width(left) - lipgloss.Width(locRendered) - 1
 	if titleWidth < 4 {

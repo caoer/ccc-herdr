@@ -7,6 +7,13 @@ fuzzy-search across the ccc session id, agent name, role, session, terminal
 title, workspace and tab labels, and working directory. Enter jumps to the
 selected pane — herdr switches workspace and tab as needed. Escape dismisses.
 
+Rows are colored and ordered by prompt-cache band, the same classes and colors
+as the P5 desk LED: cyan blocked on an AskUserQuestion, green working, then
+amber / orange / magenta / red as idle time crosses 10 / 30 / 50 / 60 min, dim
+blue once the ~1h cache has expired. Each row shows time since last activity
+(statusd's LIVENESS clock) and the cache time left. The line under the query
+counts each band; ←/→ filters the list to one band.
+
 ## Install
 
 ```sh

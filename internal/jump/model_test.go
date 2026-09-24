@@ -15,7 +15,7 @@ var sgr = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 // the first styled token. This pins that every escape sequence in a selected
 // row carries the background.
 func TestRowSelectedBackgroundEverySegment(t *testing.T) {
-	m := New(Build(snapshotFixture(), ""))
+	m := New(build(""))
 	m.width = 80
 	row := m.row(m.candidates[0], true)
 	if w := lipgloss.Width(row); w != 80 {
@@ -37,9 +37,25 @@ func TestRowSelectedBackgroundEverySegment(t *testing.T) {
 }
 
 func TestRowUnselectedFillsWidth(t *testing.T) {
-	m := New(Build(snapshotFixture(), ""))
+	m := New(build(""))
 	m.width = 80
 	if w := lipgloss.Width(m.row(m.candidates[0], false)); w != 80 {
 		t.Fatalf("unselected row must fill the popup width: got %d", w)
+	}
+}
+
+// ←/→ steps the band filter through non-empty bands only, then back to all.
+func TestCycleBandSkipsEmpty(t *testing.T) {
+	m := New(build(""))
+	want := []Band{BandWorking, BandExpired, BandNone, AnyBand}
+	for _, w := range want {
+		m.cycleBand(1)
+		if m.band != w {
+			t.Fatalf("cycle: got %d want %d", m.band, w)
+		}
+	}
+	m.cycleBand(-1)
+	if m.band != BandNone || len(m.view) != 2 { // the two plain panes
+		t.Fatalf("reverse cycle: band %d view %v", m.band, m.view)
 	}
 }

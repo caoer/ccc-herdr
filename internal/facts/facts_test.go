@@ -65,19 +65,30 @@ func TestFormatIdle(t *testing.T) {
 		{51 * time.Hour, false, "2d3h"},
 	}
 	for _, tc := range cases {
-		if got := formatIdle(tc.d, tc.unknown); got != tc.want {
-			t.Errorf("formatIdle(%v, %v): got %q want %q", tc.d, tc.unknown, got, tc.want)
+		if got := FormatIdle(tc.d, tc.unknown); got != tc.want {
+			t.Errorf("FormatIdle(%v, %v): got %q want %q", tc.d, tc.unknown, got, tc.want)
 		}
 	}
 }
 
+// IDLE reads the daemon's activity clock, never the hook stamp: a daemon
+// event re-stamping LastHookEvent on a quiet session must not reset it.
 func TestVarsIdle(t *testing.T) {
-	c := Cache{LastHookEvent: time.Now().Add(-10 * time.Minute)}
+	now := time.Now()
+	c := Cache{LastHookEvent: now, LastAPIMessage: now.Add(-10 * time.Minute)}
 	if got := Vars("abcd1234", c, MapEntry{})["IDLE"]; got != "10m" {
 		t.Fatalf("IDLE: got %q want 10m", got)
 	}
-	if got := Vars("abcd1234", Cache{}, MapEntry{})["IDLE"]; got != "" {
-		t.Fatalf("zero LastHookEvent must clear the token, got %q", got)
+	if got := Vars("abcd1234", Cache{LastHookEvent: now.Add(-time.Hour)}, MapEntry{})["IDLE"]; got != "" {
+		t.Fatalf("no activity stamp must clear the token, got %q", got)
+	}
+}
+
+func TestLastActivityFallback(t *testing.T) {
+	now := time.Now()
+	c := Cache{LastUserSubmit: now.Add(-30 * time.Minute), LastStopHook: now.Add(-20 * time.Minute)}
+	if got := c.LastActivity(); !got.Equal(c.LastStopHook) {
+		t.Fatalf("pre-field cache: want the latest hook stamp, got %v", got)
 	}
 }
 
