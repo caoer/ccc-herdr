@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -89,8 +90,8 @@ func uccHome() string {
 }
 
 // CacheDir is the statusd session-cache directory (one JSON per session).
-// Cleaned: callers compare it against filepath.Dir of fsnotify event paths,
-// and a trailing slash in the env var would silently fail every comparison.
+// Cleaned: a trailing slash in the env var must not change the paths built
+// from it.
 func CacheDir() string {
 	if dir := strings.TrimSpace(os.Getenv("CCC_CACHE_DIR")); dir != "" {
 		return filepath.Clean(dir)
@@ -134,22 +135,72 @@ func ReadCache(path string) (Cache, error) {
 	return c, nil
 }
 
+// SessionIDFromName maps a cache-dir entry to its session id. Only
+// `<sid>.json` names qualify; the daemon's session-map.json shares the
+// directory and names no session.
+func SessionIDFromName(name string) (string, bool) {
+	sid, ok := strings.CutSuffix(name, ".json")
+	if !ok || sid == "" || sid == "session-map" {
+		return "", false
+	}
+	return sid, true
+}
+
+// SessionMapCache serves the session map, re-parsing only when the file
+// resolved by SessionMapPaths changes path, mtime or size — the map runs to
+// megabytes and a resident reader asks for it on every repaint. The returned
+// map is shared: callers only index it.
+type SessionMapCache struct {
+	mu    sync.Mutex
+	path  string
+	mtime time.Time
+	size  int64
+	m     map[string]MapEntry
+}
+
+// Load returns the current map; nil on any miss, like LoadSessionMap.
+func (c *SessionMapCache) Load() map[string]MapEntry {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, path := range SessionMapPaths() {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if path == c.path && info.ModTime().Equal(c.mtime) && info.Size() == c.size {
+			return c.m
+		}
+		c.path, c.mtime, c.size = path, info.ModTime(), info.Size()
+		c.m = parseSessionMap(path)
+		return c.m
+	}
+	c.path, c.m = "", nil
+	return nil
+}
+
 // LoadSessionMap reads the whole session map — the first file of
 // SessionMapPaths that exists; nil on any miss (lenient reader — the daemon
 // rebuilds a corrupt file one entry at a time, never the painter).
 func LoadSessionMap() map[string]MapEntry {
 	for _, path := range SessionMapPaths() {
-		data, err := os.ReadFile(path)
-		if err != nil {
+		if _, err := os.Stat(path); err != nil {
 			continue
 		}
-		var m map[string]MapEntry
-		if json.Unmarshal(data, &m) != nil {
-			return nil
-		}
-		return m
+		return parseSessionMap(path)
 	}
 	return nil
+}
+
+func parseSessionMap(path string) map[string]MapEntry {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var m map[string]MapEntry
+	if json.Unmarshal(data, &m) != nil {
+		return nil
+	}
+	return m
 }
 
 // readCard parses the agent card's frontmatter; empty on any miss.

@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -224,5 +225,25 @@ func TestEndedFollowsTheDaemonWire(t *testing.T) {
 		if c.Ended() != tc.ended {
 			t.Errorf("%s: Ended()=%v want %v", name, c.Ended(), tc.ended)
 		}
+	}
+}
+
+// The cached map re-parses only when the file changes.
+func TestSessionMapCacheFollowsTheFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CCC_CACHE_DIR", dir)
+	path := filepath.Join(dir, "session-map.json")
+	os.WriteFile(path, []byte(`{"sid":{"sessionDir":"/a"}}`), 0o644)
+	var c SessionMapCache
+	first := c.Load()
+	if first["sid"].SessionDir != "/a" {
+		t.Fatalf("first load: %v", first)
+	}
+	if again := c.Load(); fmt.Sprintf("%p", again) != fmt.Sprintf("%p", first) {
+		t.Fatal("an unchanged file must serve the cached map")
+	}
+	os.WriteFile(path, []byte(`{"sid":{"sessionDir":"/bb"}}`), 0o644)
+	if got := c.Load()["sid"].SessionDir; got != "/bb" {
+		t.Fatalf("a changed file must re-parse, got %q", got)
 	}
 }

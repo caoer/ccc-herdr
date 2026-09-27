@@ -703,3 +703,47 @@ func TestEndedIntruderHandsThePaneBack(t *testing.T) {
 		t.Fatalf("the ended intruder's write must repaint the live occupant, got %v", ids)
 	}
 }
+
+// The cache dir is polled, not watched: a bound session's write paints on the
+// next tick, an unchanged cache sends nothing, and a cache created after the
+// last listing is discovered and painted within one tick.
+func TestPollPaintsChangedAndNewCaches(t *testing.T) {
+	p, sock, lines := newTestPainter(t)
+	writeSessCache(t, "polled0000000000", "p1", sock, 0)
+	p.Sweep()
+	p.pollOnce() // first listing: records names, paints nothing new
+	drain(lines)
+
+	p.pollOnce()
+	if got := metadataReports(drain(lines)); len(got) != 0 {
+		t.Fatalf("an unchanged cache must not repaint, sent %v", got)
+	}
+
+	writeSessCache(t, "polled0000000000", "p1", sock, 2) // AUQ edge, new size
+	p.pollOnce()
+	if got := metadataReports(drain(lines)); len(got) == 0 {
+		t.Fatal("a changed bound cache must repaint on the next poll")
+	}
+
+	writeSessCache(t, "newseat000000000", "p2", sock, 0)
+	p.pollOnce()
+	if ids := tokenIDs(drain(lines)); len(ids) != 1 || ids[0] != "newseat0" {
+		t.Fatalf("a cache created after the last listing must paint on the next poll, got %v", ids)
+	}
+}
+
+// session-map.json shares the cache dir and names no session.
+func TestSessionMapIsNotASession(t *testing.T) {
+	p, sock, _ := newTestPainter(t)
+	writeSessCache(t, "seat000000000000", "p1", sock, 0)
+	if err := os.WriteFile(filepath.Join(facts.CacheDir(), "session-map.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p.Sweep()
+	p.pollMu.Lock()
+	_, listed := p.polled["session-map"]
+	p.pollMu.Unlock()
+	if listed {
+		t.Fatal("session-map.json must not be polled as a session")
+	}
+}

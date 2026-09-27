@@ -21,8 +21,13 @@ import (
 )
 
 const (
-	// debounce collapses the burst of cache writes one turn produces.
-	debounce = 300 * time.Millisecond
+	// pollInterval is how often the watched session caches are stat'ed. One
+	// tick also coalesces the burst of cache writes one turn produces.
+	pollInterval = time.Second
+	// recentUnbound keeps a session cache without a pane binding on the poll
+	// list while it is this fresh: its herdr-identity stamp may land in a
+	// later write, and that write should paint within a tick, not a sweep.
+	recentUnbound = 10 * time.Minute
 	// sweepInterval drives lease renewal and decay; dedup makes a no-change
 	// sweep nearly free.
 	sweepInterval = 60 * time.Second
@@ -56,7 +61,7 @@ const (
 
 // sessState is the in-memory dedup state for one session. Its own mutex
 // covers the whole compose→decide→send→record window — Repaint is reachable
-// concurrently from debounce timers, sweeps, and the CLI (statusd used a
+// concurrently from the poll loop, sweeps, and the CLI (statusd used a
 // flock for exactly this window).
 type sessState struct {
 	mu               sync.Mutex
@@ -86,7 +91,18 @@ type Painter struct {
 	mu       sync.Mutex
 	cfg      Config
 	sessions map[string]*sessState
-	timers   map[string]*time.Timer
+
+	// sessionMap re-parses session-map.json only when it changes.
+	sessionMap facts.SessionMapCache
+
+	// The poll list: session caches stat'ed every pollInterval, with the
+	// stamp last seen. The sweep rebuilds it (pane-bound and recently active
+	// sessions); discovery adds caches created in between. dirMod and names
+	// are the cache dir's last listing, re-read only when its mtime moves.
+	pollMu sync.Mutex
+	polled map[string]fileStamp
+	names  map[string]bool
+	dirMod time.Time
 
 	// Pane-liveness sets from the last snapshot fetch (sweep-refreshed), one
 	// per herdr socket: a cache binding whose pane is gone must not be
@@ -124,7 +140,7 @@ func New(cfgPath string, logger *log.Logger) *Painter {
 		Log:         logger,
 		CfgPath:     cfgPath,
 		sessions:    map[string]*sessState{},
-		timers:      map[string]*time.Timer{},
+		polled:      map[string]fileStamp{},
 		absentProbe: map[paneKey]time.Time{},
 		lastPaint:   map[paneKey]string{},
 		quit:        make(chan struct{}),
@@ -140,18 +156,14 @@ func (p *Painter) Run(ctx context.Context) error {
 		p.Log.Printf("no cache dir resolvable (UCC_HOME unset?) — nothing to paint")
 	}
 
+	// fsnotify watches the config dir alone. The cache dir holds thousands
+	// of files and takes several writes a second; kqueue re-registers every
+	// entry on each directory change, so the caches are polled instead.
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
 	}
 	defer watcher.Close()
-	if cacheDir != "" {
-		if err := os.MkdirAll(cacheDir, 0o755); err == nil {
-			if err := watcher.Add(cacheDir); err != nil {
-				p.Log.Printf("watch %s: %v — running on sweeps only", cacheDir, err)
-			}
-		}
-	}
 	if dir := filepath.Dir(p.CfgPath); dir != "" && dir != "." {
 		_ = os.MkdirAll(dir, 0o755)
 		if err := watcher.Add(dir); err != nil {
@@ -161,6 +173,7 @@ func (p *Painter) Run(ctx context.Context) error {
 
 	go p.herdrLink(ctx)
 	go p.Sweep() // start = repaint all (fresh memory always sends)
+	go p.pollLoop(ctx)
 
 	ticker := time.NewTicker(sweepInterval)
 	defer ticker.Stop()
@@ -193,28 +206,22 @@ func (p *Painter) handleEvent(ev fsnotify.Event) {
 	if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
 		return
 	}
-	name := filepath.Clean(ev.Name)
-	if p.isConfigEvent(name) {
-		// Re-resolve before reloading: authoring ccc-herdr.star next to the
-		// live ccc-herdr.toml (or deleting it again) switches the effective
-		// file, and painting on from the dead path would be a silent no-op.
-		resolved := ConfigPath()
-		p.mu.Lock()
-		if resolved != p.CfgPath {
-			p.Log.Printf("config path now %s", resolved)
-			p.CfgPath = resolved
-		}
-		p.mu.Unlock()
-		p.Log.Printf("config changed — reloading")
-		p.reloadConfig()
-		go p.Sweep()
+	if !p.isConfigEvent(filepath.Clean(ev.Name)) {
 		return
 	}
-	if !strings.HasSuffix(ev.Name, ".json") || filepath.Dir(name) != facts.CacheDir() {
-		return
+	// Re-resolve before reloading: authoring ccc-herdr.star next to the live
+	// ccc-herdr.toml (or deleting it again) switches the effective file, and
+	// painting on from the dead path would be a silent no-op.
+	resolved := ConfigPath()
+	p.mu.Lock()
+	if resolved != p.CfgPath {
+		p.Log.Printf("config path now %s", resolved)
+		p.CfgPath = resolved
 	}
-	sid := strings.TrimSuffix(filepath.Base(ev.Name), ".json")
-	p.debounced(sid)
+	p.mu.Unlock()
+	p.Log.Printf("config changed — reloading")
+	p.reloadConfig()
+	go p.Sweep()
 }
 
 // isConfigEvent matches the active config path plus its format sibling in
@@ -230,27 +237,106 @@ func (p *Painter) isConfigEvent(name string) bool {
 	return (base == "ccc-herdr.star" || base == "ccc-herdr.toml") && filepath.Dir(name) == filepath.Dir(current)
 }
 
-// debounced schedules one repaint per session per debounce window. The
-// callback deletes only ITS OWN map entry — Reset can revive an
-// already-fired AfterFunc, and its late invocation must not delete a
-// successor timer's entry.
-func (p *Painter) debounced(sid string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if t, ok := p.timers[sid]; ok {
-		t.Reset(debounce)
+// fileStamp is what the poll compares: a cache write moves mtime or size.
+// The zero stamp marks a cache not yet stat'ed — its first poll repaints.
+type fileStamp struct {
+	mod  time.Time
+	size int64
+}
+
+func stampOf(info os.FileInfo) fileStamp { return fileStamp{info.ModTime(), info.Size()} }
+
+func (a fileStamp) same(b fileStamp) bool { return a.size == b.size && a.mod.Equal(b.mod) }
+
+func (p *Painter) pollLoop(ctx context.Context) {
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.quit:
+			return
+		case <-ticker.C:
+			p.pollOnce()
+		}
+	}
+}
+
+// pollOnce stats every cache on the poll list and repaints the ones whose
+// stamp moved; a cache that is gone leaves the list.
+func (p *Painter) pollOnce() {
+	dir := facts.CacheDir()
+	if dir == "" {
 		return
 	}
-	var t *time.Timer
-	t = time.AfterFunc(debounce, func() {
-		p.mu.Lock()
-		if p.timers[sid] == t {
-			delete(p.timers, sid)
+	p.discover(dir)
+	p.pollMu.Lock()
+	sids := make([]string, 0, len(p.polled))
+	for sid := range p.polled {
+		sids = append(sids, sid)
+	}
+	p.pollMu.Unlock()
+
+	var changed []string
+	for _, sid := range sids {
+		info, err := os.Stat(filepath.Join(dir, sid+".json"))
+		p.pollMu.Lock()
+		if old, listed := p.polled[sid]; listed {
+			if err != nil {
+				delete(p.polled, sid)
+			} else if st := stampOf(info); !st.same(old) {
+				p.polled[sid] = st
+				changed = append(changed, sid)
+			}
 		}
-		p.mu.Unlock()
+		p.pollMu.Unlock()
+	}
+	for _, sid := range changed {
 		p.Repaint(sid, false)
-	})
-	p.timers[sid] = t
+	}
+}
+
+// discover puts caches created since the last listing on the poll list, so a
+// fresh seat paints within a tick. The listing is names only and re-read only
+// when the directory's mtime moves. The first listing records names without
+// adding them: the start-up sweep covers everything already there.
+func (p *Painter) discover(dir string) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return
+	}
+	p.pollMu.Lock()
+	unchanged := p.names != nil && info.ModTime().Equal(p.dirMod)
+	p.pollMu.Unlock()
+	if unchanged {
+		return
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	names, err := f.Readdirnames(-1)
+	f.Close()
+	if err != nil {
+		return
+	}
+	current := make(map[string]bool, len(names))
+	for _, name := range names {
+		if sid, ok := facts.SessionIDFromName(name); ok {
+			current[sid] = true
+		}
+	}
+	p.pollMu.Lock()
+	if p.names != nil {
+		for sid := range current {
+			if _, listed := p.polled[sid]; !p.names[sid] && !listed {
+				p.polled[sid] = fileStamp{}
+			}
+		}
+	}
+	p.names, p.dirMod = current, info.ModTime()
+	p.pollMu.Unlock()
 }
 
 func (p *Painter) reloadConfig() {
@@ -389,7 +475,7 @@ func (p *Painter) sweepOnce() {
 	if err != nil {
 		return
 	}
-	sessionMap := facts.LoadSessionMap() // once per sweep, not per session
+	sessionMap := p.sessionMap.Load()
 
 	// Pass 1: read fresh bound caches and collect the sockets they bind to.
 	type claimant struct {
@@ -399,25 +485,35 @@ func (p *Painter) sweepOnce() {
 	var bound []claimant
 	sockSet := map[string]bool{}
 	seen := map[string]bool{}
+	listed := map[string]bool{}
+	watch := map[string]fileStamp{}
 	now := time.Now()
 	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") {
+		sid, ok := facts.SessionIDFromName(e.Name())
+		if !ok {
 			continue
 		}
+		listed[sid] = true
 		info, err := e.Info()
 		if err != nil || now.Sub(info.ModTime()) > staleSession {
 			continue
 		}
-		sid := strings.TrimSuffix(name, ".json")
 		seen[sid] = true
-		cache, err := facts.ReadCache(filepath.Join(dir, name))
-		if err != nil || cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" || cache.Ended() {
+		cache, err := facts.ReadCache(filepath.Join(dir, e.Name()))
+		if err != nil || cache.Ended() {
 			continue
 		}
+		if cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
+			if now.Sub(info.ModTime()) < recentUnbound {
+				watch[sid] = stampOf(info)
+			}
+			continue
+		}
+		watch[sid] = stampOf(info)
 		bound = append(bound, claimant{sid, cache})
 		sockSet[cache.HerdrSocketPath] = true
 	}
+	p.replacePollList(watch, listed)
 	sockets := make([]string, 0, len(sockSet))
 	for sock := range sockSet {
 		sockets = append(sockets, sock)
@@ -465,7 +561,21 @@ func (p *Painter) sweepOnce() {
 	p.mu.Unlock()
 }
 
-// Repaint is the single-session entry (debounce path, CLI). force bypasses
+// replacePollList installs the sweep's poll list: pane-bound live sessions
+// and recently written unbound ones, stamped as the sweep read them. Entries
+// the listing did not contain were discovered after it and stay.
+func (p *Painter) replacePollList(watch map[string]fileStamp, listed map[string]bool) {
+	p.pollMu.Lock()
+	defer p.pollMu.Unlock()
+	for sid, st := range p.polled {
+		if !listed[sid] {
+			watch[sid] = st
+		}
+	}
+	p.polled = watch
+}
+
+// Repaint is the single-session entry (poll path, CLI). force bypasses
 // dedup and the pane-liveness veto — never the ended rule: `ccc-herdr paint`
 // with no id forces every session, ended ones included.
 func (p *Painter) Repaint(sid string, force bool) {
@@ -480,7 +590,7 @@ func (p *Painter) Repaint(sid string, force bool) {
 	if !force && p.paneKnownDead(cache.HerdrPaneID, cache.HerdrSocketPath) {
 		return
 	}
-	p.repaint(sid, cache, facts.LoadSessionMap()[sid], force)
+	p.repaint(sid, cache, p.sessionMap.Load()[sid], force)
 }
 
 // releasePane hands a pane back when the session that last painted it has

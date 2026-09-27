@@ -23,7 +23,9 @@ edges and sweeps. Everything else already exists.
 ## Painter
 
 `ccc-herdr painter run` (flock singleton) — started by the plugin's own
-`[[startup]]` hook via `ccc-herdr painter start`, which detaches and exits.
+`[[startup]]` hook via `ccc-herdr painter start`, which detaches and exits;
+where the launchd job is loaded, `start`/`restart` kickstart it instead and
+launchd is the only thing that runs the painter.
 herdr runs startup hooks once after session restore and again on live handoff,
 asynchronously, reading their stdout/stderr to EOF — hence detach with a log
 FILE, never an inherited pipe. herdr does not supervise: crash recovery is the
@@ -50,7 +52,13 @@ one snapshot per socket per sweep. `$HERDR_SOCKET_PATH` names only the
 reconnect probe's endpoint, re-resolved to a reachable socket when the session
 that launched the painter goes away.
 
-- fsnotify on the cache dir → 300ms debounce per session → repaint
+- a 1s poll stats the pane-bound caches (plus unbound ones written in the
+  last 10 min) and repaints those whose mtime or size moved; the cache dir's
+  names are re-listed only when its mtime moves, so a cache created between
+  sweeps paints within a tick. No fsnotify on the cache dir: it holds
+  thousands of files (statusd's atomic writes leave `*.json.tmp-*` behind),
+  and kqueue re-stats and re-registers every entry on each directory change
+- session-map.json is re-parsed only when its mtime or size moves
 - a pane absent from the last sweep's liveness set is re-asked of its server
   (once per pane per second) before the event path calls it dead — a pane
   split after the sweep is absent by construction, and its seat's first label
@@ -60,7 +68,7 @@ that launched the painter goes away.
   restart. Dedup keys on the pane's last painter, so a pane relabelled by
   another claimant is retaken on the occupant's next write, and at once when
   the intruder ends
-- fsnotify on the config file → reload → repaint all
+- fsnotify on the config dir → reload → repaint all
 - 60s sweep → lease renewal (identity TTL half-life, AUQ lease), decay
 - 3 consecutive sweeps with bindings but zero reachable sockets → exit (a
   herdr start re-runs the [[startup]] hook; zero bindings never retires)

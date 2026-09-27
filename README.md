@@ -61,8 +61,8 @@ speaks to herdr. Architecture and cutover: `DESIGN.md`.
 ```sh
 ccc-herdr check [sid]     # config diagnostics + exact wire lines (exit 1 on diags)
 ccc-herdr paint [sid]     # force a repaint now
-ccc-herdr painter start   # detach the resident loop; no-op if one is up
-ccc-herdr painter restart # stop the incumbent (pid in the lock), then start
+ccc-herdr painter start   # start the resident loop; no-op if one is up
+ccc-herdr painter restart # replace the running painter with the installed binary
 ccc-herdr painter run     # the resident loop, foreground
 ```
 
@@ -75,14 +75,23 @@ singleton. herdr does not supervise it: a crashed painter stays down until the
 next herdr start or a hand `painter start`. It retires itself once every herdr
 socket its bindings name has been unreachable for three sweeps (~3 min), so a
 host with no herdr left keeps no resident holding the lock. `contrib/dev.ccc.herdr-painter.plist`
-adds macOS launchd KeepAlive supervision on top; the flock keeps both safe.
+adds macOS launchd KeepAlive supervision. Where that job is loaded, launchd owns
+the painter: `painter start` runs `launchctl kickstart` (starts the job if it is
+down) and `painter restart` runs `launchctl kickstart -k`, so no detached copy
+ever runs beside the job. A launchd-run painter that finds the lock held by a
+painter started outside launchd stops that holder and takes the lock.
 
 Upgrading the plugin does NOT upgrade the running painter: the old process
 holds the flock, so a fresh binary's `painter start` no-ops and the host keeps
-painting with the old code, silently. Finish an upgrade with `painter restart`
-— it reads the pid the incumbent stamped in `painter.lock`, SIGTERMs it, waits
-for the lock, then starts the new one. (On the mac, launchd KeepAlive respawns
-whatever the plist points at — restart the job instead.)
+painting with the old code, silently. Finish an upgrade with `painter restart`.
+Without launchd it reads the pid the incumbent stamped in `painter.lock`,
+SIGTERMs it, waits for the lock, then starts the new one. On the mac, rebuild
+`bin/ccc-herdr` (the path the plist runs) and restart the job:
+
+```sh
+go build -o bin/ccc-herdr .
+launchctl kickstart -k gui/$UID/dev.ccc.herdr-painter   # what `painter restart` runs
+```
 
 Config: `$UCC_HOME/config/ccc-herdr.star`, else `ccc-herdr.toml`, hot-reloaded
 on save. Missing file = built-in defaults (the classic id/session/role/name

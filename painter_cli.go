@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +38,47 @@ func runPainter(args []string) int {
 	}
 }
 
+// launchdLabel is the macOS launchd job contrib/ ships.
+const launchdLabel = "dev.ccc.herdr-painter"
+
+// launchdTarget names the painter's launchd job when it is loaded ("" when
+// not, and off macOS). A loaded job owns the painter's lifecycle: a detached
+// child beside it holds the lock while KeepAlive respawns the job forever.
+func launchdTarget() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), launchdLabel)
+	if exec.Command("launchctl", "print", target).Run() != nil {
+		return ""
+	}
+	return target
+}
+
+// launchdRun reports that this process IS the launchd job: launchd sets
+// XPC_SERVICE_NAME to the job label for the processes it spawns.
+func launchdRun() bool { return os.Getenv("XPC_SERVICE_NAME") == launchdLabel }
+
+// kickstartPainter hands start/restart to launchd: `kickstart` starts the job
+// if it is down, `kickstart -k` replaces the running instance.
+func kickstartPainter(target string, restart bool) int {
+	args := []string{"kickstart"}
+	if restart {
+		args = append(args, "-k")
+	}
+	out, err := exec.Command("launchctl", append(args, target)...).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ccc-herdr: launchctl %s: %v %s\n", strings.Join(append(args, target), " "), err, strings.TrimSpace(string(out)))
+		return 1
+	}
+	verb := "started"
+	if restart {
+		verb = "restarted"
+	}
+	fmt.Printf("ccc-herdr: painter %s via launchd (%s)\n", verb, target)
+	return 0
+}
+
 // startPainter launches the resident loop detached and exits — herdr's
 // [[startup]] hook is one-shot, not a supervisor, and it reads the hook's
 // stdout/stderr pipes to EOF. So the child gets its own session (setsid) and
@@ -47,7 +89,13 @@ func runPainter(args []string) int {
 // takeover=true (`painter restart`) stops the incumbent first — what an
 // upgrade needs, since a running old painter holds the lock and a freshly
 // installed binary would no-op against it.
+//
+// Where the launchd job is loaded, launchd runs the painter and both verbs
+// kickstart it instead.
 func startPainter(takeover bool) int {
+	if target := launchdTarget(); target != "" {
+		return kickstartPainter(target, takeover)
+	}
 	if takeover {
 		switch result, pid := painter.StopIncumbent(5 * time.Second); result {
 		case painter.Stopped:
@@ -106,6 +154,19 @@ func startPainter(takeover bool) int {
 // runPainterLoop is the resident loop: `ccc-herdr painter run`.
 func runPainterLoop() int {
 	release, ok := painter.AcquireSingleton()
+	if !ok && launchdRun() {
+		// launchd runs one instance of its job, so the holder is a painter
+		// started beside it (a detached `painter start`). The job is the
+		// owner: replace the holder rather than exit into a KeepAlive loop.
+		switch result, pid := painter.StopIncumbent(5 * time.Second); result {
+		case painter.Stopped:
+			fmt.Printf("ccc-herdr: took over from painter %d\n", pid)
+		case painter.Stuck, painter.Unidentified:
+			fmt.Fprintf(os.Stderr, "ccc-herdr: launchd painter cannot replace the holder of %s (pid %d)\n", painter.LockPath(), pid)
+			return 1
+		}
+		release, ok = painter.AcquireSingleton()
+	}
 	if !ok {
 		fmt.Fprintln(os.Stderr, "ccc-herdr: another painter is already running")
 		return 1
@@ -134,11 +195,10 @@ func resolveSessionIDs(arg string) ([]string, error) {
 	}
 	var ids []string
 	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".json") {
+		sid, ok := facts.SessionIDFromName(e.Name())
+		if !ok {
 			continue
 		}
-		sid := strings.TrimSuffix(name, ".json")
 		if arg != "" && !strings.HasPrefix(sid, arg) {
 			continue
 		}

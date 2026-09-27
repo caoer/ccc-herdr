@@ -16,9 +16,8 @@
 	<true/>
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
-	<!-- fsnotify's kqueue backend opens one fd per file in the watched cache
-	     dir (hundreds of session files); launchd's default soft limit (256)
-	     would exhaust in silence. -->
+	<!-- fsnotify's kqueue backend opens one fd per file in the watched config
+	     dir; headroom over launchd's default soft limit (256). -->
 	<key>SoftResourceLimits</key>
 	<dict>
 		<key>NumberOfFiles</key>
