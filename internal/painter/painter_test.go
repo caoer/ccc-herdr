@@ -843,6 +843,35 @@ func TestResumeFollowsTheLiveSeatWhenHerdrsIdIsDead(t *testing.T) {
 	}
 }
 
+// A cache whose process died without a SessionEnd stays "live". When herdr's
+// own session in the pane ended, such a claimant — silent since before that
+// session started — is not the pane's seat, and herdr's id no ccc cache knows
+// is not ours to override: neither pane gets a command.
+func TestResumeIgnoresClaimantsThatCannotBeTheSeat(t *testing.T) {
+	p, sock, lines, panes := newTestPainterDynamic(t)
+	withLauncher(t)
+	panes.set("p1", "p2")
+	panes.setNative("p1", "later00000000000")
+	writeClaimant(t, "later00000000000", "p1", sock, time.Now().Add(-5*time.Minute), time.Now().Add(-4*time.Minute))
+	writeClaimant(t, "crashed000000000", "p1", sock, time.Now().Add(-time.Hour), time.Time{})
+	panes.setNative("p2", "vanilla000000000") // a claude ccc never saw
+	writeClaimant(t, "stale00000000000", "p2", sock, time.Now().Add(-time.Hour), time.Time{})
+
+	p.Sweep()
+	if got := resumeWire(drain(lines)); len(got) != 0 {
+		t.Fatalf("neither pane has a seat of ours to resume, sent %v", got)
+	}
+
+	// A command reported before herdr's session began is taken back.
+	p.mu.Lock()
+	p.resume[paneKey{sock, "p1"}] = resumeHold{sid: "crashed000000000"}
+	p.mu.Unlock()
+	p.Sweep()
+	if got := resumeWire(drain(lines)); strings.Join(got, "|") != "p1 release" {
+		t.Fatalf("the rejected claimant's command must be released, got %v", got)
+	}
+}
+
 // A seat that ended leaves its pane with no resume of ours: after the grace
 // (a reboot kills seats and herdr together, and a release must not beat
 // herdr's last save) the command is released once, and later sweeps report

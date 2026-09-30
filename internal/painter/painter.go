@@ -514,7 +514,8 @@ func (p *Painter) sweepOnce() {
 
 	// Pass 1: read fresh bound caches and collect the sockets they bind to.
 	var bound []claimant
-	ended := map[string]time.Time{} // sid → its SessionEnd
+	ended := map[string]time.Time{}   // sid → its SessionEnd
+	started := map[string]time.Time{} // sid → its SessionStart, ended or live
 	sockSet := map[string]bool{}
 	seen := map[string]bool{}
 	listed := map[string]bool{}
@@ -535,6 +536,7 @@ func (p *Painter) sweepOnce() {
 		if err != nil {
 			continue
 		}
+		started[sid] = cache.LastSessionStart
 		if cache.Ended() {
 			ended[sid] = cache.LastSessionEnd
 			continue
@@ -593,7 +595,7 @@ func (p *Painter) sweepOnce() {
 	for _, c := range best {
 		p.repaint(c.sid, c.cache, sessionMap[c.sid], false)
 	}
-	p.paintResumes(best, byPane, native, ended, gone)
+	p.paintResumes(best, byPane, native, started, ended, gone)
 
 	// Forget sessions whose cache file is gone — their labels TTL out.
 	p.mu.Lock()
@@ -617,10 +619,14 @@ type claimant struct {
 // claimant: herdr refuses a `startup` report over a held claude id, so a
 // /background fork or a child `claude -p` that inherited the pane's env never
 // displaces the seat (subagents share their parent's id and never bind a pane
-// of their own). Otherwise it is the newest live claimant — herdr's id is then
-// absent or dead, the case this command exists for: a second seat started
-// while yazi or a wrapper script held the foreground.
-func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map[string]claimant, native map[paneKey]string, ended map[string]time.Time, gone map[paneKey]bool) {
+// of their own). When herdr's id is a ccc session that ended — the case this
+// command exists for: a second seat started while yazi or a wrapper script held
+// the foreground — the seat is the newest live claimant active since that
+// session started; one silent since before then (a cache whose process died
+// without a SessionEnd) was not in the pane's foreground. A herdr id ccc never
+// saw leaves the pane to herdr; a pane with no herdr id takes the newest live
+// claimant.
+func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map[string]claimant, native map[paneKey]string, started, ended map[string]time.Time, gone map[paneKey]bool) {
 	launcher := resumeLauncher()
 	if launcher == "" || !p.config().Enabled {
 		return
@@ -629,8 +635,12 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 	ownerPane := map[string]paneKey{}
 	for k, c := range best {
 		sid := c.sid
-		if seat, ok := byPane[k][native[k]]; ok {
-			sid = seat.sid
+		if nat := native[k]; nat != "" {
+			if seat, ok := byPane[k][nat]; ok {
+				sid = seat.sid
+			} else if _, over := ended[nat]; !over || !c.cache.LastHookEvent.After(started[nat]) {
+				continue
+			}
 		}
 		owners[k] = sid
 		ownerPane[sid] = k
@@ -653,15 +663,15 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 			p.dropResume(k) // the pane is gone and its command with it
 			continue
 		}
-		moved := false
-		if at, ok := ownerPane[h.sid]; ok && at != k {
-			moved = true
-		}
+		at, owns := ownerPane[h.sid]
+		moved := owns && at != k
 		endAt, isEnded := ended[h.sid]
 		over := isEnded && time.Since(endAt) > resumeReleaseGrace
-		// A quiet seat past the sweep's staleness window is neither: it keeps
-		// its command.
-		if !over && !moved {
+		// Still bound here, yet the election gave the pane no seat.
+		rejected := byPane[k][h.sid].sid != "" && !owns
+		// A quiet seat past the sweep's staleness window is none of these: it
+		// keeps its command.
+		if !over && !moved && !rejected {
 			continue
 		}
 		if err := herdr.SendReport(k.sock, ComposeResumeRelease(k.pane)); err != nil {
