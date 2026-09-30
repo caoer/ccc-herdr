@@ -80,7 +80,13 @@ writers were short-lived processes). Painter start = repaint all, cheap.
 
 Writers keep statusd's sources — `ccc:identity` (tokens, display_agent,
 params) and `ccc:auq` (state_labels{blocked} lease) — so ownership transfers
-without a herdr-side change.
+without a herdr-side change. A third, `ccc:resume`, gives each pane the
+command herdr's restore types into it: `command $UCC_HOME/bin/ucc-auto
+--resume <seat>` (`pane.report_agent_session` `resume_argv`, which herdr
+prefers over its built-in `claude --resume <id>`). The seat is the session
+herdr itself accepted for the pane when that session is a live claimant,
+else the newest live claimant; an ended or moved seat's command is released
+(`pane.release_agent`). `enabled = false` turns all three off.
 
 ## Testing painter behaviour on a live host
 

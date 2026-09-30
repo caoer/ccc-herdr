@@ -616,7 +616,7 @@ type claimant struct {
 // while yazi or a wrapper script held the foreground.
 func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map[string]claimant, native map[paneKey]string, ended map[string]bool, gone map[paneKey]bool) {
 	launcher := resumeLauncher()
-	if launcher == "" {
+	if launcher == "" || !p.config().Enabled {
 		return
 	}
 	owners := map[paneKey]string{}
