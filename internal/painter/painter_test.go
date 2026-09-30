@@ -899,3 +899,33 @@ func TestEndedSeatReleasesItsResume(t *testing.T) {
 		t.Fatalf("a pane whose seat ended must report nothing, sent %v", got)
 	}
 }
+
+// A seat that exits and is relaunched with the same id in its pane: herdr
+// dropped the plan when the first process exited to the shell, so the new
+// start re-reports the command at once, not at the next resumeRenew.
+func TestRelaunchedSeatReReportsItsResume(t *testing.T) {
+	p, sock, lines, panes := newTestPainterDynamic(t)
+	launcher := withLauncher(t)
+	panes.set("p1")
+	panes.setNative("p1", "seat000000000000")
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now().Add(-5*time.Minute), time.Time{})
+	p.Sweep()
+	drain(lines)
+
+	exit := time.Now().Add(-10 * time.Second) // /exit, inside the release grace
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now().Add(-5*time.Minute), exit)
+	p.Repaint("seat000000000000", false)
+	drain(lines)
+
+	// The relaunch: SessionStart (lastHook - 1m) five seconds after the exit.
+	writeClaimant(t, "seat000000000000", "p1", sock, exit.Add(time.Minute+5*time.Second), exit)
+	p.Repaint("seat000000000000", false)
+	want := []string{"p1 command " + launcher + " --resume seat000000000000"}
+	if got := resumeWire(drain(lines)); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("a relaunched seat must re-report its resume at once: got %v, want %v", got, want)
+	}
+	p.Sweep()
+	if got := resumeWire(drain(lines)); len(got) != 0 {
+		t.Fatalf("the re-reported resume must dedup, sent %v", got)
+	}
+}

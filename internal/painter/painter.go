@@ -97,9 +97,13 @@ type sessState struct {
 	resumeStart time.Time
 }
 
-// resumeHold is one pane's accepted resume command.
+// resumeHold is one pane's accepted resume command. start is the seat's
+// SessionStart it was reported for: herdr drops the command when the seat's
+// process exits to the shell, so a relaunch of the same id is a new start
+// that must report it again.
 type resumeHold struct {
 	sid              string
+	start            time.Time
 	sockDev, sockIno uint64
 	at               time.Time
 	failure          string // last logged rejection, so a retry loop logs once
@@ -631,22 +635,22 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 	if launcher == "" || !p.config().Enabled {
 		return
 	}
-	owners := map[paneKey]string{}
+	owners := map[paneKey]claimant{}
 	ownerPane := map[string]paneKey{}
 	for k, c := range best {
-		sid := c.sid
+		owner := c
 		if nat := native[k]; nat != "" {
 			if seat, ok := byPane[k][nat]; ok {
-				sid = seat.sid
+				owner = seat
 			} else if _, over := ended[nat]; !over || !c.cache.LastHookEvent.After(started[nat]) {
 				continue
 			}
 		}
-		owners[k] = sid
-		ownerPane[sid] = k
+		owners[k] = owner
+		ownerPane[owner.sid] = k
 	}
-	for k, sid := range owners {
-		p.paintResume(k, sid, launcher)
+	for k, owner := range owners {
+		p.paintResume(k, owner.sid, owner.cache.LastSessionStart, launcher)
 	}
 
 	p.mu.Lock()
@@ -682,10 +686,10 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 }
 
 // paintResume reports sid's resume command to pane k unless the pane already
-// holds it from this socket incarnation within resumeRenew. herdr rejects it
-// (resume_not_accepted) until it has seen claude start in the pane; the next
-// sweep retries, and the rejection is logged once.
-func (p *Painter) paintResume(k paneKey, sid, launcher string) {
+// holds it for this start of sid, from this socket incarnation, within
+// resumeRenew. herdr rejects it (resume_not_accepted) until it has seen claude
+// start in the pane; the next sweep retries, and the rejection is logged once.
+func (p *Painter) paintResume(k paneKey, sid string, start time.Time, launcher string) {
 	dev, ino, ok := herdr.SocketIdentity(k.sock)
 	if !ok {
 		return
@@ -694,7 +698,7 @@ func (p *Painter) paintResume(k paneKey, sid, launcher string) {
 	p.mu.Lock()
 	h := p.resume[k]
 	p.mu.Unlock()
-	if h.sid == sid && h.sockDev == dev && h.sockIno == ino && now.Sub(h.at) < resumeRenew {
+	if h.sid == sid && h.start.Equal(start) && h.sockDev == dev && h.sockIno == ino && now.Sub(h.at) < resumeRenew {
 		return
 	}
 	err := herdr.SendReport(k.sock, ComposeResume(k.pane, sid, launcher))
@@ -708,7 +712,7 @@ func (p *Painter) paintResume(k paneKey, sid, launcher string) {
 		return
 	}
 	delete(p.resumeFailure, k)
-	p.resume[k] = resumeHold{sid: sid, sockDev: dev, sockIno: ino, at: now}
+	p.resume[k] = resumeHold{sid: sid, start: start, sockDev: dev, sockIno: ino, at: now}
 }
 
 func (p *Painter) dropResume(k paneKey) {
@@ -734,14 +738,16 @@ func resumeLauncher() string {
 }
 
 // askResumeSweep runs one sweep per SessionStart of a bound session that does
-// not hold its pane's resume command, so a new seat's command lands within a
+// not hold its pane's resume command for that start, so a new seat's command —
+// or a relaunched seat's, which herdr dropped at the exit — lands within a
 // poll tick rather than at the next periodic sweep. The sweep's election, not
 // this session, decides who gets the pane.
 func (p *Painter) askResumeSweep(sid string, cache facts.Cache) {
 	k := paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}
 	p.mu.Lock()
-	holds := p.resume[k].sid == sid
+	h := p.resume[k]
 	p.mu.Unlock()
+	holds := h.sid == sid && h.start.Equal(cache.LastSessionStart)
 	if holds {
 		return
 	}
