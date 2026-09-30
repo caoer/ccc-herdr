@@ -89,6 +89,9 @@ func uccHome() string {
 	return filepath.Join(home, ".local", "share", "ucc")
 }
 
+// UCCHome is $UCC_HOME with the standard fallback; "" when unresolvable.
+func UCCHome() string { return uccHome() }
+
 // CacheDir is the statusd session-cache directory (one JSON per session).
 // Cleaned: a trailing slash in the env var must not change the paths built
 // from it.

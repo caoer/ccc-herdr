@@ -47,6 +47,9 @@ type Report struct {
 	DisplayAgent     string
 	StateLabels      map[string]string
 	ClearStateLabels bool
+	// ResumeArgv is the command herdr types into the pane on restore
+	// (pane.report_agent_session), overriding its built-in resume.
+	ResumeArgv []string
 	// Method overrides the JSON-RPC method — a herdr rename is a config edit.
 	Method string
 	// Extra is merged into params verbatim BEFORE the typed fields, so config
@@ -92,6 +95,9 @@ func (r Report) wireParams(seq int64) map[string]any {
 	}
 	if r.ClearStateLabels {
 		params["clear_state_labels"] = true
+	}
+	if r.ResumeArgv != nil {
+		params["resume_argv"] = r.ResumeArgv
 	}
 	return params
 }

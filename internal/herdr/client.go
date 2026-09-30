@@ -26,6 +26,17 @@ type Pane struct {
 	AgentStatus   string            `json:"agent_status"`
 	TerminalTitle string            `json:"terminal_title_stripped"`
 	Tokens        map[string]string `json:"tokens"`
+	// AgentSession is the session herdr's own integration accepted for the
+	// pane — what its restore resumes when no reporter supplies a command.
+	AgentSession *AgentSession `json:"agent_session"`
+}
+
+// AgentSession is herdr's session reference for a pane's agent.
+type AgentSession struct {
+	Source string `json:"source"`
+	Agent  string `json:"agent"`
+	Kind   string `json:"kind"`
+	Value  string `json:"value"`
 }
 
 // AgentSeq carries the per-agent activity counter used for recency ordering.

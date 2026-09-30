@@ -43,6 +43,17 @@ func stubHerdr(t *testing.T) (string, chan string) {
 type stubPanes struct {
 	mu  sync.Mutex
 	ids []string
+	// native is the session herdr's own integration holds per pane.
+	native map[string]string
+}
+
+func (s *stubPanes) setNative(paneID, sid string) {
+	s.mu.Lock()
+	if s.native == nil {
+		s.native = map[string]string{}
+	}
+	s.native[paneID] = sid
+	s.mu.Unlock()
 }
 
 func (s *stubPanes) set(ids ...string) {
@@ -54,9 +65,13 @@ func (s *stubPanes) set(ids ...string) {
 func (s *stubPanes) reply() []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	panes := make([]map[string]string, 0, len(s.ids))
+	panes := make([]map[string]any, 0, len(s.ids))
 	for _, id := range s.ids {
-		panes = append(panes, map[string]string{"pane_id": id})
+		pane := map[string]any{"pane_id": id}
+		if sid := s.native[id]; sid != "" {
+			pane["agent_session"] = map[string]string{"source": "herdr:claude", "agent": "claude", "kind": "id", "value": sid}
+		}
+		panes = append(panes, pane)
 	}
 	line, _ := json.Marshal(map[string]any{
 		"id":     "stub",
@@ -745,5 +760,106 @@ func TestSessionMapIsNotASession(t *testing.T) {
 	p.pollMu.Unlock()
 	if listed {
 		t.Fatal("session-map.json must not be polled as a session")
+	}
+}
+
+// withLauncher installs the ucc launcher resume reports name and returns its
+// path; without it the painter reports no resume (a host without ucc).
+func withLauncher(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(facts.UCCHome(), "bin", "ucc-auto")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// resumeWire lists the resume reports (argv) and releases ("release") on the
+// wire, in order, as "<pane> <argv or release>".
+func resumeWire(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		var m struct {
+			Method string `json:"method"`
+			Params struct {
+				PaneID     string   `json:"pane_id"`
+				Source     string   `json:"source"`
+				ResumeArgv []string `json:"resume_argv"`
+			} `json:"params"`
+		}
+		if json.Unmarshal([]byte(l), &m) != nil || m.Params.Source != SourceResume {
+			continue
+		}
+		switch m.Method {
+		case "pane.report_agent_session":
+			out = append(out, m.Params.PaneID+" "+strings.Join(m.Params.ResumeArgv, " "))
+		case "pane.release_agent":
+			out = append(out, m.Params.PaneID+" release")
+		}
+	}
+	return out
+}
+
+// A /background fork or a child `claude -p` inherits the seat's pane env and
+// binds the pane with newer hook activity. herdr keeps the seat's id (it
+// refuses a startup report over a held one), so the seat keeps the resume.
+func TestResumeNamesHerdrsSeatOverANewerFork(t *testing.T) {
+	p, sock, lines, panes := newTestPainterDynamic(t)
+	launcher := withLauncher(t)
+	panes.set("p1")
+	panes.setNative("p1", "seat000000000000")
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now().Add(-time.Minute), time.Time{})
+	writeClaimant(t, "fork000000000000", "p1", sock, time.Now(), time.Time{})
+
+	p.Sweep()
+	want := []string{"p1 command " + launcher + " --resume seat000000000000"}
+	if got := resumeWire(drain(lines)); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("resume must name herdr's seat, not the newer fork: got %v, want %v", got, want)
+	}
+}
+
+// herdr's id is dead when a second seat started while yazi held the pane's
+// foreground: herdr never saw the first exit and refused the second startup.
+// The live seat gets the resume, by the absolute launcher.
+func TestResumeFollowsTheLiveSeatWhenHerdrsIdIsDead(t *testing.T) {
+	p, sock, lines, panes := newTestPainterDynamic(t)
+	launcher := withLauncher(t)
+	panes.set("p1")
+	panes.setNative("p1", "first00000000000")
+	writeClaimant(t, "first00000000000", "p1", sock, time.Now().Add(-time.Minute), time.Now().Add(-time.Minute))
+	writeClaimant(t, "second0000000000", "p1", sock, time.Now(), time.Time{})
+
+	p.Sweep()
+	want := []string{"p1 command " + launcher + " --resume second0000000000"}
+	if got := resumeWire(drain(lines)); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("resume must name the live second seat: got %v, want %v", got, want)
+	}
+	p.Sweep()
+	if got := resumeWire(drain(lines)); len(got) != 0 {
+		t.Fatalf("an accepted resume must dedup, sent %v", got)
+	}
+}
+
+// A seat that ended leaves its pane with no resume of ours: its SessionEnd
+// write releases the command, and later sweeps report nothing for the pane.
+func TestEndedSeatReleasesItsResume(t *testing.T) {
+	p, sock, lines, panes := newTestPainterDynamic(t)
+	withLauncher(t)
+	panes.set("p1")
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now(), time.Time{})
+	p.Sweep()
+	drain(lines)
+
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now(), time.Now()) // its SessionEnd
+	p.Repaint("seat000000000000", false)
+	if got := resumeWire(drain(lines)); strings.Join(got, "|") != "p1 release" {
+		t.Fatalf("the ended seat's pane must be released once, got %v", got)
+	}
+	p.Sweep()
+	if got := resumeWire(drain(lines)); len(got) != 0 {
+		t.Fatalf("a pane whose seat ended must report nothing, sent %v", got)
 	}
 }

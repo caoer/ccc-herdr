@@ -119,6 +119,46 @@ func ComposeIdentity(paneID string, cfg Config, vars map[string]string, diag Dia
 	return report, true
 }
 
+// SourceResume owns the pane's resume command: the command herdr types into
+// the pane when its server restarts, instead of its built-in
+// `claude --resume <id>`. Two things make that built-in wrong on this fleet:
+// herdr keeps a dead id when a second seat starts without the pane shell
+// regaining the foreground (yazi, a wrapper script), and a bare `claude`
+// resolves through PATH after direnv, so an .envrc can swap the binary. The
+// painter names the session from ccc's own pane binding and the launcher by
+// absolute path behind the `command` builtin, which PATH cannot shadow.
+const SourceResume = "ccc:resume"
+
+// resumeAgent is herdr's agent label for the report. herdr keeps a reported
+// command only while it sees this agent running in the pane.
+const resumeAgent = "claude"
+
+// ComposeResume renders the report that makes herdr resume sessionID with
+// launcher (an absolute path) when it restores the pane.
+func ComposeResume(paneID, sessionID, launcher string) herdr.Report {
+	return herdr.Report{
+		PaneID:     paneID,
+		Source:     SourceResume,
+		Agent:      resumeAgent,
+		Method:     "pane.report_agent_session",
+		Seq:        time.Now().UnixNano(),
+		ResumeArgv: []string{"command", launcher, "--resume", sessionID},
+	}
+}
+
+// ComposeResumeRelease renders the report that drops the pane's resume
+// command, for a pane whose seat ended or moved. herdr releases only this
+// source's command; its own session reference and agent detection stay.
+func ComposeResumeRelease(paneID string) herdr.Report {
+	return herdr.Report{
+		PaneID: paneID,
+		Source: SourceResume,
+		Agent:  resumeAgent,
+		Method: "pane.release_agent",
+		Seq:    time.Now().UnixNano(),
+	}
+}
+
 // ComposeAUQ renders the blocked-label report: a LEASE while questions pend
 // (the sweep renews it, so a canceled question TTLs out without a clear
 // path), an explicit clear on the pending→0 edge.

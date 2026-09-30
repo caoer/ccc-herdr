@@ -53,6 +53,10 @@ const (
 	// would strand a near-static row past its TTL (herdr drops the metadata,
 	// the pane goes dark with no content change coming to fix it).
 	failureRetryCooldown = 5 * time.Minute
+	// resumeRenew re-asserts an unchanged resume command: herdr drops it
+	// whenever it stops seeing claude in the pane, and a seat that lives on
+	// in a yazi or wrapper foreground never writes a new cache to say so.
+	resumeRenew = 10 * time.Minute
 	// deadSweepsBeforeRetire is how many consecutive sweeps must find every
 	// bound socket unreachable before the painter exits — 3 sweeps ≈ 3
 	// minutes, long enough to ride out a herdr restart.
@@ -81,6 +85,18 @@ type sessState struct {
 
 	lastPending int // -1 = unknown → first AUQ decision always sends
 	auqSentAt   time.Time
+
+	// resumeStart is the SessionStart this session last asked a sweep for:
+	// a new seat in a pane gets its resume command within a tick, once.
+	resumeStart time.Time
+}
+
+// resumeHold is one pane's accepted resume command.
+type resumeHold struct {
+	sid              string
+	sockDev, sockIno uint64
+	at               time.Time
+	failure          string // last logged rejection, so a retry loop logs once
 }
 
 // Painter is the resident renderer: cache facts in, herdr metadata out.
@@ -119,6 +135,10 @@ type Painter struct {
 	// stayed wrong until the rightful seat's own content changed — its hash
 	// still matched what IT had last sent.
 	lastPaint map[paneKey]string
+	// resume is the resume command each pane last accepted from us: whose
+	// session, against which socket incarnation, when. Sweep-owned.
+	resume        map[paneKey]resumeHold
+	resumeFailure map[paneKey]string
 
 	// sweepMu makes acquire/release/record one critical section — two
 	// independent atomics left a window where a coalesced request landed
@@ -137,13 +157,15 @@ type Painter struct {
 
 func New(cfgPath string, logger *log.Logger) *Painter {
 	p := &Painter{
-		Log:         logger,
-		CfgPath:     cfgPath,
-		sessions:    map[string]*sessState{},
-		polled:      map[string]fileStamp{},
-		absentProbe: map[paneKey]time.Time{},
-		lastPaint:   map[paneKey]string{},
-		quit:        make(chan struct{}),
+		Log:           logger,
+		CfgPath:       cfgPath,
+		sessions:      map[string]*sessState{},
+		polled:        map[string]fileStamp{},
+		absentProbe:   map[paneKey]time.Time{},
+		lastPaint:     map[paneKey]string{},
+		resume:        map[paneKey]resumeHold{},
+		resumeFailure: map[paneKey]string{},
+		quit:          make(chan struct{}),
 	}
 	p.reloadConfig() // eager: one-shot callers (paint) never call Run
 	return p
@@ -384,8 +406,11 @@ type paneKey struct{ sock, pane string }
 // unvetoed: they were sent and rejected `pane_not_found` until the failure
 // brake cooled them. A socket that answers nothing is omitted, not empty:
 // unreachable means UNKNOWN (never dead), and sends fail on their own.
-func (p *Painter) refreshLivePanes(sockets []string) map[string]map[string]bool {
-	live := make(map[string]map[string]bool, len(sockets))
+// native is each live pane's herdr-accepted session id, for the resume
+// election.
+func (p *Painter) refreshLivePanes(sockets []string) (live map[string]map[string]bool, native map[paneKey]string) {
+	live = make(map[string]map[string]bool, len(sockets))
+	native = map[paneKey]string{}
 	for _, sock := range sockets {
 		snap, err := herdr.NewClientFor(sock).Snapshot()
 		if err != nil || snap == nil {
@@ -394,6 +419,9 @@ func (p *Painter) refreshLivePanes(sockets []string) map[string]map[string]bool 
 		panes := make(map[string]bool, len(snap.Panes))
 		for _, pane := range snap.Panes {
 			panes[pane.PaneID] = true
+			if pane.AgentSession != nil && pane.AgentSession.Value != "" {
+				native[paneKey{sock, pane.PaneID}] = pane.AgentSession.Value
+			}
 		}
 		live[sock] = panes
 	}
@@ -406,7 +434,7 @@ func (p *Painter) refreshLivePanes(sockets []string) map[string]map[string]bool 
 		p.livePanes[sock] = livePaneSet{panes: panes, at: now}
 	}
 	p.mu.Unlock()
-	return live
+	return live, native
 }
 
 // paneKnownDead consults the last liveness set for the event path; unknown
@@ -435,7 +463,8 @@ func (p *Painter) paneKnownDead(paneID, sockPath string) bool {
 	p.absentProbe[k] = now
 	p.mu.Unlock()
 
-	panes, known := p.refreshLivePanes([]string{sockPath})[sockPath]
+	live, _ := p.refreshLivePanes([]string{sockPath})
+	panes, known := live[sockPath]
 	if !known {
 		return false // unreachable is unknown, never dead
 	}
@@ -478,11 +507,8 @@ func (p *Painter) sweepOnce() {
 	sessionMap := p.sessionMap.Load()
 
 	// Pass 1: read fresh bound caches and collect the sockets they bind to.
-	type claimant struct {
-		sid   string
-		cache facts.Cache
-	}
 	var bound []claimant
+	ended := map[string]bool{}
 	sockSet := map[string]bool{}
 	seen := map[string]bool{}
 	listed := map[string]bool{}
@@ -500,7 +526,11 @@ func (p *Painter) sweepOnce() {
 		}
 		seen[sid] = true
 		cache, err := facts.ReadCache(filepath.Join(dir, e.Name()))
-		if err != nil || cache.Ended() {
+		if err != nil {
+			continue
+		}
+		if cache.Ended() {
+			ended[sid] = true
 			continue
 		}
 		if cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
@@ -518,7 +548,7 @@ func (p *Painter) sweepOnce() {
 	for sock := range sockSet {
 		sockets = append(sockets, sock)
 	}
-	live := p.refreshLivePanes(sockets)
+	live, native := p.refreshLivePanes(sockets)
 	p.retireIfHerdrIsGone(len(sockets), len(live))
 
 	// Pass 2: veto bindings whose pane its OWN server says is gone, then
@@ -529,17 +559,24 @@ func (p *Painter) sweepOnce() {
 	// sweep. Keyed with the socket because pane ids are per-herdr-instance:
 	// two instances both have a w1:p1.
 	best := map[paneKey]claimant{}
+	byPane := map[paneKey]map[string]claimant{}
+	gone := map[paneKey]bool{}
 	vetoed := 0
 	for _, c := range bound {
 		k := paneKey{c.cache.HerdrSocketPath, c.cache.HerdrPaneID}
 		if panes, known := live[c.cache.HerdrSocketPath]; known && !panes[c.cache.HerdrPaneID] {
 			vetoed++
+			gone[k] = true
 			p.mu.Lock()
 			delete(p.lastPaint, k)
 			delete(p.absentProbe, k)
 			p.mu.Unlock()
 			continue // pane is gone — labels decay via TTL
 		}
+		if byPane[k] == nil {
+			byPane[k] = map[string]claimant{}
+		}
+		byPane[k][c.sid] = c
 		if cur, taken := best[k]; !taken || c.cache.LastHookEvent.After(cur.cache.LastHookEvent) {
 			best[k] = c
 		}
@@ -550,6 +587,7 @@ func (p *Painter) sweepOnce() {
 	for _, c := range best {
 		p.repaint(c.sid, c.cache, sessionMap[c.sid], false)
 	}
+	p.paintResumes(best, byPane, native, ended, gone)
 
 	// Forget sessions whose cache file is gone — their labels TTL out.
 	p.mu.Lock()
@@ -559,6 +597,144 @@ func (p *Painter) sweepOnce() {
 		}
 	}
 	p.mu.Unlock()
+}
+
+// claimant is a live session cache bound to a pane.
+type claimant struct {
+	sid   string
+	cache facts.Cache
+}
+
+// paintResumes gives each pane the resume command of its seat and takes it
+// back from a pane whose seat ended or moved to another pane. The seat is the
+// session herdr itself accepted for the pane when that session is a live
+// claimant: herdr refuses a `startup` report over a held claude id, so a
+// /background fork or a child `claude -p` that inherited the pane's env never
+// displaces the seat (subagents share their parent's id and never bind a pane
+// of their own). Otherwise it is the newest live claimant — herdr's id is then
+// absent or dead, the case this command exists for: a second seat started
+// while yazi or a wrapper script held the foreground.
+func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map[string]claimant, native map[paneKey]string, ended map[string]bool, gone map[paneKey]bool) {
+	launcher := resumeLauncher()
+	if launcher == "" {
+		return
+	}
+	owners := map[paneKey]string{}
+	ownerPane := map[string]paneKey{}
+	for k, c := range best {
+		sid := c.sid
+		if seat, ok := byPane[k][native[k]]; ok {
+			sid = seat.sid
+		}
+		owners[k] = sid
+		ownerPane[sid] = k
+	}
+	for k, sid := range owners {
+		p.paintResume(k, sid, launcher)
+	}
+
+	p.mu.Lock()
+	held := make(map[paneKey]resumeHold, len(p.resume))
+	for k, h := range p.resume {
+		held[k] = h
+	}
+	p.mu.Unlock()
+	for k, h := range held {
+		if _, owned := owners[k]; owned {
+			continue
+		}
+		if gone[k] {
+			p.dropResume(k) // the pane is gone and its command with it
+			continue
+		}
+		moved := false
+		if at, ok := ownerPane[h.sid]; ok && at != k {
+			moved = true
+		}
+		// A quiet seat past the sweep's staleness window is neither: it keeps
+		// its command.
+		if !ended[h.sid] && !moved {
+			continue
+		}
+		if err := herdr.SendReport(k.sock, ComposeResumeRelease(k.pane)); err != nil {
+			p.Log.Printf("resume release %s (%s): %v", k.pane, h.sid, err)
+		}
+		p.dropResume(k)
+	}
+}
+
+// paintResume reports sid's resume command to pane k unless the pane already
+// holds it from this socket incarnation within resumeRenew. herdr rejects it
+// (resume_not_accepted) until it has seen claude start in the pane; the next
+// sweep retries, and the rejection is logged once.
+func (p *Painter) paintResume(k paneKey, sid, launcher string) {
+	dev, ino, ok := herdr.SocketIdentity(k.sock)
+	if !ok {
+		return
+	}
+	now := time.Now()
+	p.mu.Lock()
+	h := p.resume[k]
+	p.mu.Unlock()
+	if h.sid == sid && h.sockDev == dev && h.sockIno == ino && now.Sub(h.at) < resumeRenew {
+		return
+	}
+	err := herdr.SendReport(k.sock, ComposeResume(k.pane, sid, launcher))
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err != nil {
+		if msg := sid + " " + err.Error(); p.resumeFailure[k] != msg {
+			p.resumeFailure[k] = msg
+			p.Log.Printf("resume %s → %s: %v", sid, k.pane, err)
+		}
+		return
+	}
+	delete(p.resumeFailure, k)
+	p.resume[k] = resumeHold{sid: sid, sockDev: dev, sockIno: ino, at: now}
+}
+
+func (p *Painter) dropResume(k paneKey) {
+	p.mu.Lock()
+	delete(p.resume, k)
+	delete(p.resumeFailure, k)
+	p.mu.Unlock()
+}
+
+// resumeLauncher is the ucc launcher a restored pane resumes through, by
+// absolute path; "" on a host without ucc, where no resume is reported. On
+// `--resume` it restores the session's profile, model, effort and role.
+func resumeLauncher() string {
+	home := facts.UCCHome()
+	if home == "" {
+		return ""
+	}
+	path := filepath.Join(home, "bin", "ucc-auto")
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return ""
+	}
+	return path
+}
+
+// askResumeSweep runs one sweep per SessionStart of a bound session that does
+// not hold its pane's resume command, so a new seat's command lands within a
+// poll tick rather than at the next periodic sweep. The sweep's election, not
+// this session, decides who gets the pane.
+func (p *Painter) askResumeSweep(sid string, cache facts.Cache) {
+	k := paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}
+	p.mu.Lock()
+	holds := p.resume[k].sid == sid
+	p.mu.Unlock()
+	if holds {
+		return
+	}
+	st := p.state(sid)
+	st.mu.Lock()
+	fresh := !cache.LastSessionStart.Equal(st.resumeStart)
+	st.resumeStart = cache.LastSessionStart
+	st.mu.Unlock()
+	if fresh {
+		p.Sweep()
+	}
 }
 
 // replacePollList installs the sweep's poll list: pane-bound live sessions
@@ -591,6 +767,7 @@ func (p *Painter) Repaint(sid string, force bool) {
 		return
 	}
 	p.repaint(sid, cache, p.sessionMap.Load()[sid], force)
+	p.askResumeSweep(sid, cache)
 }
 
 // releasePane hands a pane back when the session that last painted it has
@@ -598,8 +775,9 @@ func (p *Painter) Repaint(sid string, force bool) {
 // its next content change. An ended session that never held the pane leaves
 // nothing to restore.
 func (p *Painter) releasePane(cache facts.Cache) {
+	k := paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}
 	p.mu.Lock()
-	held := p.lastPaint[paneKey{cache.HerdrSocketPath, cache.HerdrPaneID}] == cache.SessionID
+	held := p.lastPaint[k] == cache.SessionID || p.resume[k].sid == cache.SessionID
 	p.mu.Unlock()
 	if held {
 		p.Sweep()
