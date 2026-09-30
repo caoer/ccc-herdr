@@ -5,8 +5,10 @@ min_herdr_version = "0.7.5"
 description = "ccc fleet companion: fuzzy-jump to any agent or pane by id, name, title, or role."
 platforms = ["linux", "macos"]
 
+# CGO_ENABLED=0: net and os/user have pure-Go paths, and a host with go but
+# no C compiler (the NixOS desks) otherwise fails on runtime/cgo.
 [[build]]
-command = ["go", "build", "-o", "./bin/ccc-herdr", "."]
+command = ["env", "CGO_ENABLED=0", "go", "build", "-o", "./bin/ccc-herdr", "."]
 
 # The painter is a resident process, so the plugin owns its lifecycle: herdr
 # runs [[startup]] once per enabled plugin after session restore and again on
