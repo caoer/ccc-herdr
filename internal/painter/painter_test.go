@@ -843,18 +843,25 @@ func TestResumeFollowsTheLiveSeatWhenHerdrsIdIsDead(t *testing.T) {
 	}
 }
 
-// A seat that ended leaves its pane with no resume of ours: its SessionEnd
-// write releases the command, and later sweeps report nothing for the pane.
+// A seat that ended leaves its pane with no resume of ours: after the grace
+// (a reboot kills seats and herdr together, and a release must not beat
+// herdr's last save) the command is released once, and later sweeps report
+// nothing for the pane.
 func TestEndedSeatReleasesItsResume(t *testing.T) {
 	p, sock, lines, panes := newTestPainterDynamic(t)
 	withLauncher(t)
 	panes.set("p1")
-	writeClaimant(t, "seat000000000000", "p1", sock, time.Now(), time.Time{})
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now().Add(-2*time.Minute), time.Time{})
 	p.Sweep()
 	drain(lines)
 
-	writeClaimant(t, "seat000000000000", "p1", sock, time.Now(), time.Now()) // its SessionEnd
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now().Add(-2*time.Minute), time.Now()) // its SessionEnd
 	p.Repaint("seat000000000000", false)
+	if got := resumeWire(drain(lines)); len(got) != 0 {
+		t.Fatalf("a seat that just ended keeps its command through the grace, sent %v", got)
+	}
+	writeClaimant(t, "seat000000000000", "p1", sock, time.Now().Add(-2*time.Minute), time.Now().Add(-time.Minute))
+	p.Sweep()
 	if got := resumeWire(drain(lines)); strings.Join(got, "|") != "p1 release" {
 		t.Fatalf("the ended seat's pane must be released once, got %v", got)
 	}

@@ -57,6 +57,12 @@ const (
 	// whenever it stops seeing claude in the pane, and a seat that lives on
 	// in a yazi or wrapper foreground never writes a new cache to say so.
 	resumeRenew = 10 * time.Minute
+	// resumeReleaseGrace holds an ended seat's command this long before the
+	// release. On a reboot the seats and herdr die together: a release that
+	// reached herdr before its last save would erase the command the restore
+	// needs. A graceful `herdr server stop` saves before its panes die and
+	// refuses API requests after, so only a still-running server hears it.
+	resumeReleaseGrace = 30 * time.Second
 	// deadSweepsBeforeRetire is how many consecutive sweeps must find every
 	// bound socket unreachable before the painter exits — 3 sweeps ≈ 3
 	// minutes, long enough to ride out a herdr restart.
@@ -508,7 +514,7 @@ func (p *Painter) sweepOnce() {
 
 	// Pass 1: read fresh bound caches and collect the sockets they bind to.
 	var bound []claimant
-	ended := map[string]bool{}
+	ended := map[string]time.Time{} // sid → its SessionEnd
 	sockSet := map[string]bool{}
 	seen := map[string]bool{}
 	listed := map[string]bool{}
@@ -530,7 +536,7 @@ func (p *Painter) sweepOnce() {
 			continue
 		}
 		if cache.Ended() {
-			ended[sid] = true
+			ended[sid] = cache.LastSessionEnd
 			continue
 		}
 		if cache.HerdrPaneID == "" || cache.HerdrSocketPath == "" {
@@ -614,7 +620,7 @@ type claimant struct {
 // of their own). Otherwise it is the newest live claimant — herdr's id is then
 // absent or dead, the case this command exists for: a second seat started
 // while yazi or a wrapper script held the foreground.
-func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map[string]claimant, native map[paneKey]string, ended map[string]bool, gone map[paneKey]bool) {
+func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map[string]claimant, native map[paneKey]string, ended map[string]time.Time, gone map[paneKey]bool) {
 	launcher := resumeLauncher()
 	if launcher == "" || !p.config().Enabled {
 		return
@@ -651,9 +657,11 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 		if at, ok := ownerPane[h.sid]; ok && at != k {
 			moved = true
 		}
+		endAt, isEnded := ended[h.sid]
+		over := isEnded && time.Since(endAt) > resumeReleaseGrace
 		// A quiet seat past the sweep's staleness window is neither: it keeps
 		// its command.
-		if !ended[h.sid] && !moved {
+		if !over && !moved {
 			continue
 		}
 		if err := herdr.SendReport(k.sock, ComposeResumeRelease(k.pane)); err != nil {
