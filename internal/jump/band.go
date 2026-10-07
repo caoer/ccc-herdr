@@ -41,7 +41,7 @@ var bandMeta = [bandCount]struct {
 }{
 	BandBlocked: {"AUQ", "#00DCFF"},
 	BandWorking: {"working", "#00C83C"},
-	BandIdle10:  {"<10m", "#5096E6"},
+	BandIdle10:  {"<10m", "#9B5AE6"},
 	BandIdle30:  {"<30m", "#00B89C"},
 	BandIdle40:  {"<40m", "#E6C84A"},
 	BandIdle60:  {"<60m", "#FF0028"},

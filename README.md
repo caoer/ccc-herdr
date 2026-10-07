@@ -9,7 +9,7 @@ selected pane — herdr switches workspace and tab as needed. Escape dismisses.
 
 Rows are colored and ordered by prompt-cache band, the same classes and colors
 as the P5 desk LED: cyan blocked on an AskUserQuestion, green working, then
-blue / teal / yellow / red as idle time crosses 10 / 30 / 40 / 60 min, neutral
+violet / teal / yellow / red as idle time crosses 10 / 30 / 40 / 60 min, neutral
 grey once the ~1h cache has expired. Red marks only the last 20 minutes. Each row shows time since last activity
 (statusd's LIVENESS clock), the cache time left, and — when the popup is wide
 enough — the working directory. The tab row under the query counts each band,
