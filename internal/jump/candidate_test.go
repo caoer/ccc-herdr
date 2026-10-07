@@ -139,7 +139,10 @@ func TestClassifyMatchesLEDBands(t *testing.T) {
 		{false, true, 2 * time.Hour, BandWorking},
 		{false, false, 9 * time.Minute, BandIdle10},
 		{false, false, 10 * time.Minute, BandIdle30},
-		{false, false, 49 * time.Minute, BandIdle50},
+		{false, false, 30 * time.Minute, BandIdle40},
+		{false, false, 40*time.Minute - time.Nanosecond, BandIdle40},
+		{false, false, 40 * time.Minute, BandIdle60},
+		{false, false, 49 * time.Minute, BandIdle60},
 		{false, false, 59 * time.Minute, BandIdle60},
 		{false, false, 60 * time.Minute, BandExpired},
 	}
@@ -154,7 +157,7 @@ func TestClassifyMatchesLEDBands(t *testing.T) {
 }
 
 func TestTTLText(t *testing.T) {
-	c := Candidate{Band: BandIdle50, Age: 42*time.Minute + 30*time.Second, AgeKnown: true}
+	c := Candidate{Band: BandIdle60, Age: 42*time.Minute + 30*time.Second, AgeKnown: true}
 	if got := c.TTLText(); got != "17m left" {
 		t.Fatalf("TTLText: %q", got)
 	}

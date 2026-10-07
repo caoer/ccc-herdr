@@ -17,7 +17,7 @@ const (
 	BandWorking
 	BandIdle10 // idle < 10m
 	BandIdle30 // idle < 30m
-	BandIdle50 // idle < 50m
+	BandIdle40 // idle < 40m
 	BandIdle60 // idle < 60m, cache about to expire
 	BandExpired
 	BandNone // plain pane, or an agent with no activity clock
@@ -30,21 +30,22 @@ const (
 // cacheTTL is the prompt-cache lifetime the idle bands count down to.
 const cacheTTL = time.Hour
 
-var bandLimits = [...]time.Duration{10 * time.Minute, 30 * time.Minute, 50 * time.Minute, cacheTTL}
+var bandLimits = [...]time.Duration{10 * time.Minute, 30 * time.Minute, 40 * time.Minute, cacheTTL}
 
-// bandMeta: LED RGB, except expired — the LED's (0,40,120) is invisible on a
-// dark terminal, so the popup lifts it to a legible dim blue of the same hue.
+// bandMeta: LED RGB, except expired — the LED's dark grey (80,80,80) is
+// lifted to a legible neutral grey for terminal text. Red is reserved for
+// the last 20 minutes before the one-hour cache threshold.
 var bandMeta = [bandCount]struct {
 	name  string
 	color string
 }{
 	BandBlocked: {"AUQ", "#00DCFF"},
 	BandWorking: {"working", "#00C83C"},
-	BandIdle10:  {"<10m", "#E69600"},
-	BandIdle30:  {"<30m", "#FF5000"},
-	BandIdle50:  {"<50m", "#C80078"},
+	BandIdle10:  {"<10m", "#5096E6"},
+	BandIdle30:  {"<30m", "#00B89C"},
+	BandIdle40:  {"<40m", "#E6C84A"},
 	BandIdle60:  {"<60m", "#FF0028"},
-	BandExpired: {"expired", "#3A5FA8"},
+	BandExpired: {"expired", "#888888"},
 	BandNone:    {"other", "#808080"},
 }
 
