@@ -96,3 +96,16 @@ func TestComposeAUQ(t *testing.T) {
 		t.Fatalf("clear: %+v", clear)
 	}
 }
+
+// The restore runs the guard in front of the launcher; with no guard named it
+// types the launcher directly.
+func TestComposeResumeArgv(t *testing.T) {
+	got := ComposeResume("p1", "sid", "/u/bin/ucc-auto", "/p/bin/ccc-herdr").ResumeArgv
+	if want := "command /p/bin/ccc-herdr resume sid /u/bin/ucc-auto"; strings.Join(got, " ") != want {
+		t.Fatalf("guarded argv %q, want %q", strings.Join(got, " "), want)
+	}
+	got = ComposeResume("p1", "sid", "/u/bin/ucc-auto", "").ResumeArgv
+	if want := "command /u/bin/ucc-auto --resume sid"; strings.Join(got, " ") != want {
+		t.Fatalf("unguarded argv %q, want %q", strings.Join(got, " "), want)
+	}
+}

@@ -15,6 +15,12 @@
 //	ccc-herdr check [sid]    config diagnostics + the exact wire line(s)
 //	ccc-herdr paint [sid]    force one repaint (all sessions without sid)
 //
+// Restore:
+//
+//	ccc-herdr resume <sid> <launcher>  the command herdr's pane restore types:
+//	                         exec `<launcher> --resume <sid>` unless a live
+//	                         process already runs the session
+//
 // Open file (phase 3):
 //
 //	ccc-herdr openfile       action entrypoint: opens the filepicker popup
@@ -38,6 +44,7 @@ import (
 	"github.com/caoer/ccc-herdr/internal/herdr"
 	"github.com/caoer/ccc-herdr/internal/jump"
 	"github.com/caoer/ccc-herdr/internal/openfile"
+	"github.com/caoer/ccc-herdr/internal/resume"
 )
 
 func main() {
@@ -67,8 +74,10 @@ func main() {
 		code = runFilePicker()
 	case "open-exec":
 		code = runOpenExec()
+	case "resume":
+		code = resume.Main(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list|painter run|painter start|check [sid]|paint [sid]|openfile|filepicker|open-exec")
+		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list|painter run|painter start|check [sid]|paint [sid]|openfile|filepicker|open-exec|resume <sid> <launcher>")
 		code = 2
 	}
 	os.Exit(code)
