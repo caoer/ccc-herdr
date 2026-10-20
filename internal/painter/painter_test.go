@@ -763,10 +763,17 @@ func TestSessionMapIsNotASession(t *testing.T) {
 	}
 }
 
-// withLauncher installs the ucc launcher resume reports name and returns its
-// path; without it the painter reports no resume (a host without ucc).
+// testGuard is the ccc-herdr path resume reports name under withLauncher.
+const testGuard = "/test/bin/ccc-herdr"
+
+// withLauncher installs the ucc launcher resume reports name, pins the guard
+// to testGuard, and returns the launcher's path; without it the painter
+// reports no resume (a host without ucc).
 func withLauncher(t *testing.T) string {
 	t.Helper()
+	oldGuard := resumeGuard
+	resumeGuard = func() string { return testGuard }
+	t.Cleanup(func() { resumeGuard = oldGuard })
 	path := filepath.Join(facts.UCCHome(), "bin", "ucc-auto")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -775,6 +782,11 @@ func withLauncher(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// resumeArgv is the wire form of a resume report for sid through launcher.
+func resumeArgv(launcher, sid string) string {
+	return "command " + testGuard + " resume " + sid + " " + launcher
 }
 
 // resumeWire lists the resume reports (argv) and releases ("release") on the
@@ -815,7 +827,7 @@ func TestResumeNamesHerdrsSeatOverANewerFork(t *testing.T) {
 	writeClaimant(t, "fork000000000000", "p1", sock, time.Now(), time.Time{})
 
 	p.Sweep()
-	want := []string{"p1 command " + launcher + " --resume seat000000000000"}
+	want := []string{"p1 " + resumeArgv(launcher, "seat000000000000")}
 	if got := resumeWire(drain(lines)); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("resume must name herdr's seat, not the newer fork: got %v, want %v", got, want)
 	}
@@ -833,7 +845,7 @@ func TestResumeFollowsTheLiveSeatWhenHerdrsIdIsDead(t *testing.T) {
 	writeClaimant(t, "second0000000000", "p1", sock, time.Now(), time.Time{})
 
 	p.Sweep()
-	want := []string{"p1 command " + launcher + " --resume second0000000000"}
+	want := []string{"p1 " + resumeArgv(launcher, "second0000000000")}
 	if got := resumeWire(drain(lines)); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("resume must name the live second seat: got %v, want %v", got, want)
 	}
@@ -920,7 +932,7 @@ func TestRelaunchedSeatReReportsItsResume(t *testing.T) {
 	// The relaunch: SessionStart (lastHook - 1m) five seconds after the exit.
 	writeClaimant(t, "seat000000000000", "p1", sock, exit.Add(time.Minute+5*time.Second), exit)
 	p.Repaint("seat000000000000", false)
-	want := []string{"p1 command " + launcher + " --resume seat000000000000"}
+	want := []string{"p1 " + resumeArgv(launcher, "seat000000000000")}
 	if got := resumeWire(drain(lines)); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("a relaunched seat must re-report its resume at once: got %v, want %v", got, want)
 	}

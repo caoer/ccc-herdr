@@ -635,6 +635,7 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 	if launcher == "" || !p.config().Enabled {
 		return
 	}
+	guard := resumeGuard()
 	owners := map[paneKey]claimant{}
 	ownerPane := map[string]paneKey{}
 	for k, c := range best {
@@ -650,7 +651,7 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 		ownerPane[owner.sid] = k
 	}
 	for k, owner := range owners {
-		p.paintResume(k, owner.sid, owner.cache.LastSessionStart, launcher)
+		p.paintResume(k, owner.sid, owner.cache.LastSessionStart, launcher, guard)
 	}
 
 	p.mu.Lock()
@@ -689,7 +690,7 @@ func (p *Painter) paintResumes(best map[paneKey]claimant, byPane map[paneKey]map
 // holds it for this start of sid, from this socket incarnation, within
 // resumeRenew. herdr rejects it (resume_not_accepted) until it has seen claude
 // start in the pane; the next sweep retries, and the rejection is logged once.
-func (p *Painter) paintResume(k paneKey, sid string, start time.Time, launcher string) {
+func (p *Painter) paintResume(k paneKey, sid string, start time.Time, launcher, guard string) {
 	dev, ino, ok := herdr.SocketIdentity(k.sock)
 	if !ok {
 		return
@@ -701,7 +702,7 @@ func (p *Painter) paintResume(k paneKey, sid string, start time.Time, launcher s
 	if h.sid == sid && h.start.Equal(start) && h.sockDev == dev && h.sockIno == ino && now.Sub(h.at) < resumeRenew {
 		return
 	}
-	err := herdr.SendReport(k.sock, ComposeResume(k.pane, sid, launcher))
+	err := herdr.SendReport(k.sock, ComposeResume(k.pane, sid, launcher, guard))
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {
@@ -732,6 +733,18 @@ func resumeLauncher() string {
 	}
 	path := filepath.Join(home, "bin", "ucc-auto")
 	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		return ""
+	}
+	return path
+}
+
+// resumeGuard is the ccc-herdr binary a restored pane runs first, by absolute
+// path: its `resume` verb execs the launcher only when no live process already
+// runs the session. "" when this executable cannot be named; the pane then
+// resumes through the launcher directly. A var so a test pins the path.
+var resumeGuard = func() string {
+	path, err := os.Executable()
+	if err != nil {
 		return ""
 	}
 	return path

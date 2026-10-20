@@ -127,6 +127,11 @@ func ComposeIdentity(paneID string, cfg Config, vars map[string]string, diag Dia
 // resolves through PATH after direnv, so an .envrc can swap the binary. The
 // painter names the session from ccc's own pane binding and the launcher by
 // absolute path behind the `command` builtin, which PATH cannot shadow.
+//
+// The command runs `ccc-herdr resume` (internal/resume) in front of the
+// launcher: after a host restart a heartbeat wake can resume the seat before
+// herdr restores the pane, and a second resume of a live session shares its
+// transcript. The guard refuses when a live process already runs the session.
 const SourceResume = "ccc:resume"
 
 // resumeAgent is herdr's agent label for the report. herdr keeps a reported
@@ -134,15 +139,20 @@ const SourceResume = "ccc:resume"
 const resumeAgent = "claude"
 
 // ComposeResume renders the report that makes herdr resume sessionID with
-// launcher (an absolute path) when it restores the pane.
-func ComposeResume(paneID, sessionID, launcher string) herdr.Report {
+// launcher (an absolute path) when it restores the pane, through guard (the
+// ccc-herdr binary, an absolute path) when one is named.
+func ComposeResume(paneID, sessionID, launcher, guard string) herdr.Report {
+	argv := []string{"command", launcher, "--resume", sessionID}
+	if guard != "" {
+		argv = []string{"command", guard, "resume", sessionID, launcher}
+	}
 	return herdr.Report{
 		PaneID:     paneID,
 		Source:     SourceResume,
 		Agent:      resumeAgent,
 		Method:     "pane.report_agent_session",
 		Seq:        time.Now().UnixNano(),
-		ResumeArgv: []string{"command", launcher, "--resume", sessionID},
+		ResumeArgv: argv,
 	}
 }
 
