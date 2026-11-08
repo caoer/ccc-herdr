@@ -184,6 +184,57 @@ func (c *Client) PaneRead(paneID, source string, lines int) (string, error) {
 	return result.Read.Text, nil
 }
 
+// PaneReadANSI is PaneRead keeping the terminal's colors (format ansi).
+func (c *Client) PaneReadANSI(paneID, source string, lines int) (string, error) {
+	params := map[string]any{"pane_id": paneID, "source": source, "format": "ansi"}
+	if lines > 0 {
+		params["lines"] = lines
+	}
+	var result struct {
+		Read struct {
+			Text string `json:"text"`
+		} `json:"read"`
+	}
+	if err := c.call("pane.read", params, &result); err != nil {
+		return "", err
+	}
+	return result.Read.Text, nil
+}
+
+// Process is one process in a pane's foreground process group.
+type Process struct {
+	PID  int      `json:"pid"`
+	Name string   `json:"name"`
+	Argv []string `json:"argv"`
+}
+
+// ProcessInfo is pane.process_info: the pane's root shell and the processes
+// holding its terminal's foreground.
+type ProcessInfo struct {
+	ShellPID               int       `json:"shell_pid"`
+	ForegroundProcessGroup int       `json:"foreground_process_group_id"`
+	ForegroundProcesses    []Process `json:"foreground_processes"`
+}
+
+// ProcessInfo asks the server which processes run in the pane.
+func (c *Client) ProcessInfo(paneID string) (*ProcessInfo, error) {
+	var result struct {
+		ProcessInfo *ProcessInfo `json:"process_info"`
+	}
+	if err := c.call("pane.process_info", map[string]any{"pane_id": paneID}, &result); err != nil {
+		return nil, err
+	}
+	if result.ProcessInfo == nil {
+		return nil, fmt.Errorf("pane.process_info: empty result for %s", paneID)
+	}
+	return result.ProcessInfo, nil
+}
+
+// ClosePane closes the pane and kills what runs in it.
+func (c *Client) ClosePane(paneID string) error {
+	return c.call("pane.close", map[string]any{"pane_id": paneID}, nil)
+}
+
 // PluginPaneOpen opens a manifest pane entrypoint. placement overrides the
 // manifest default when non-empty; targetPaneID seats split placements;
 // workspaceID seats tab placements; env is merged into the pane's launch env.

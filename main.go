@@ -28,6 +28,14 @@
 //	                         scraped from the origin pane's output
 //	ccc-herdr open-exec      opener-pane entrypoint: exec the editor on
 //	                         CCC_HERDR_OPEN_FILE / CCC_HERDR_OPEN_LINE
+//
+// Reap idle panes:
+//
+//	ccc-herdr reap           action entrypoint: opens the reaper popup
+//	ccc-herdr reaper         popup entrypoint: idle panes with a live preview;
+//	                         enter closes the marked (or selected) panes
+//	ccc-herdr idle [--close] headless: list panes at an empty shell prompt,
+//	                         or close every one of them
 package main
 
 import (
@@ -76,8 +84,14 @@ func main() {
 		code = runOpenExec()
 	case "resume":
 		code = resume.Main(os.Args[2:])
+	case "reap":
+		code = runReap()
+	case "reaper":
+		code = runReaper()
+	case "idle":
+		code = runIdle(os.Args[2:])
 	default:
-		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list|painter run|painter start|check [sid]|paint [sid]|openfile|filepicker|open-exec|resume <sid> <launcher>")
+		fmt.Fprintln(os.Stderr, "usage: ccc-herdr jump|jumper|focus <query>|list|painter run|painter start|check [sid]|paint [sid]|openfile|filepicker|open-exec|resume <sid> <launcher>|reap|reaper|idle [--close]")
 		code = 2
 	}
 	os.Exit(code)

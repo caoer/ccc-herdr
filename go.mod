@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	charm.land/bubbletea/v2 v2.1.0
 	charm.land/lipgloss/v2 v2.0.6
+	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/pelletier/go-toml/v2 v2.4.3
 	go.starlark.net v0.0.0-20261021141710-4f4267fb140d
@@ -13,7 +14,6 @@ require (
 require (
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20261023060817-a45b7c86333f // indirect
-	github.com/charmbracelet/x/ansi v0.11.9 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect

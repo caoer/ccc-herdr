@@ -32,6 +32,13 @@ description = "Fuzzy-find a file path in the pane's output and open it in the ed
 contexts = ["tab", "pane"]
 command = ["./bin/ccc-herdr", "openfile"]
 
+[[actions]]
+id = "reap"
+title = "CCC: close idle panes"
+description = "List panes left at an empty shell prompt, preview them, and close the ones you pick."
+contexts = ["tab", "pane"]
+command = ["./bin/ccc-herdr", "reap"]
+
 [[panes]]
 id = "jumper"
 title = "Jump to agent"
@@ -52,3 +59,11 @@ command = ["./bin/ccc-herdr", "filepicker"]
 id = "opener"
 title = "Editor"
 command = ["./bin/ccc-herdr", "open-exec"]
+
+[[panes]]
+id = "reaper"
+title = "Close idle panes"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["./bin/ccc-herdr", "reaper"]
